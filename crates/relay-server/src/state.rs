@@ -1,4 +1,7 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use axum::{
     body::Bytes,
@@ -30,14 +33,14 @@ pub enum RelayEvent {
 
 #[derive(Clone)]
 pub struct AppState {
-    auth_tokens: Arc<HashMap<String, String>>,
+    auth_tokens: Arc<HashSet<String>>,
     agents: Arc<RwLock<HashMap<String, AgentHandle>>>,
     inflight: Arc<DashMap<Uuid, mpsc::Sender<RelayEvent>>>,
     pub request_timeout_secs: u64,
 }
 
 impl AppState {
-    pub fn new(auth_tokens: HashMap<String, String>, request_timeout_secs: u64) -> Self {
+    pub fn new(auth_tokens: HashSet<String>, request_timeout_secs: u64) -> Self {
         Self {
             auth_tokens: Arc::new(auth_tokens),
             agents: Arc::new(RwLock::new(HashMap::new())),
@@ -46,15 +49,17 @@ impl AppState {
         }
     }
 
-    pub fn validate_token(&self, tunnel_id: &str, token: &str) -> bool {
-        self.auth_tokens
-            .get(tunnel_id)
-            .is_some_and(|expected| expected == token)
+    pub fn validate_token(&self, token: &str) -> bool {
+        !self.auth_tokens.is_empty() && self.auth_tokens.contains(token)
     }
 
-    pub async fn insert_agent(&self, tunnel_id: String, handle: AgentHandle) {
+    pub async fn insert_agent_if_absent(&self, tunnel_id: String, handle: AgentHandle) -> bool {
         let mut agents = self.agents.write().await;
+        if agents.contains_key(&tunnel_id) {
+            return false;
+        }
         agents.insert(tunnel_id, handle);
+        true
     }
 
     pub async fn get_agent(&self, tunnel_id: &str) -> Option<AgentHandle> {
@@ -106,5 +111,29 @@ impl AppState {
         if let Some((_, sender)) = self.inflight.remove(&request_id) {
             let _ = sender.send(RelayEvent::Error { code, message }).await;
         }
+    }
+}
+
+pub fn is_valid_tunnel_id(tunnel_id: &str) -> bool {
+    if tunnel_id.is_empty() || tunnel_id.len() > 64 {
+        return false;
+    }
+    tunnel_id
+        .bytes()
+        .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_valid_tunnel_id;
+
+    #[test]
+    fn tunnel_id_validation() {
+        assert!(is_valid_tunnel_id("demo"));
+        assert!(is_valid_tunnel_id("demo_1"));
+        assert!(is_valid_tunnel_id("A-1"));
+        assert!(!is_valid_tunnel_id(""));
+        assert!(!is_valid_tunnel_id("bad/path"));
+        assert!(!is_valid_tunnel_id("bad space"));
     }
 }

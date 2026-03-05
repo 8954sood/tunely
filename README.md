@@ -18,7 +18,7 @@ Rust로 구현한 경량 reverse tunnel MVP입니다.
 ## 핵심 동작
 
 1. Agent가 `/ws`로 접속 후 `RegisterAgent { tunnel_id, token }` 전송
-2. Relay가 토큰 검증 후 세션 등록
+2. Relay가 토큰 검증 후 tunnel_id를 동적으로 세션 등록
 3. 외부 요청 `http://relay/t/<tunnel_id>/...` 수신
 4. Relay가 `request_id` 생성 후 `HttpRequestStart` + request body chunk 전송
 5. Agent가 로컬 서버로 요청 전달 (`reqwest`)
@@ -61,6 +61,29 @@ Rust로 구현한 경량 reverse tunnel MVP입니다.
 
 - Ubuntu(amd64/arm64): [docs/ubuntu.md](docs/ubuntu.md)
 - Windows(x64): [docs/windows.md](docs/windows.md)
+
+## Relay 설정 파일 (YAML)
+
+Relay는 파일 설정을 지원합니다.
+
+- 기본 경로: `/etc/tunely/relay.yaml`
+- 예제 경로: `/etc/tunely/relay.example.yaml` (주석 템플릿)
+
+예시:
+
+```yaml
+listen: "0.0.0.0:8080"
+auth_tokens:
+  - "xxx"
+  - "yyy"
+request_timeout_secs: 60
+```
+
+실행:
+
+```bash
+relay-server --config /etc/tunely/relay.yaml
+```
 
 ## 테스트
 
@@ -154,11 +177,16 @@ cargo build --release --target x86_64-pc-windows-msvc -p relay-server -p agent
 - 해당 `tunnel_id`로 연결된 agent가 없는 상태
 - agent 로그에서 `agent registered` 확인
 
-### 3) `register rejected: invalid tunnel_id/token`
+### 3) `register rejected: invalid token`
 
-- relay의 `--auth`와 agent의 `--tunnel-id`, `--token` 값이 일치해야 함
+- relay `auth_tokens` 목록에 agent의 `--token`이 포함되어야 함
 
-### 4) `Address already in use`
+### 4) `register rejected: tunnel_id already in use`
+
+- 이미 같은 `tunnel_id`가 연결 중이면 신규 agent 연결이 거절됨
+- 기존 agent 연결이 끊긴 뒤에는 동일 `tunnel_id` 재연결 가능
+
+### 5) `Address already in use`
 
 - 포트 충돌입니다. 기존 프로세스를 종료하거나 다른 포트를 사용하세요.
 

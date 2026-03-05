@@ -20,8 +20,8 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    let config = Config::parse();
-    let state = AppState::new(config.auth.clone(), config.request_timeout_secs);
+    let config = Config::parse().resolve()?;
+    let state = AppState::new(config.auth_tokens.clone(), config.request_timeout_secs);
 
     let app = Router::new()
         .route("/ws", get(ws_session::ws_handler))

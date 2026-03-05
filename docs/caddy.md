@@ -12,7 +12,7 @@ relay는 내부 포트(`127.0.0.1:8080`)에서만 동작하게 운영할 수 있
 ## 1) Relay를 내부 포트로 실행
 
 ```bash
-./relay-server --listen 127.0.0.1:8080 --auth demo=xxx
+./relay-server --listen 127.0.0.1:8080 --auth-token xxx,yyy
 ```
 
 ## 2) Caddy 설치 (Ubuntu 예시)

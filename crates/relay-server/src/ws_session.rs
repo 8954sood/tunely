@@ -14,7 +14,7 @@ use tokio::sync::mpsc;
 use tracing::{info, warn};
 use uuid::Uuid;
 
-use crate::state::{AgentHandle, AppState};
+use crate::state::{is_valid_tunnel_id, AgentHandle, AppState};
 
 pub async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
     ws.on_upgrade(move |socket| handle_socket(socket, state))
@@ -52,22 +52,35 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
         }
     };
 
-    if !state.validate_token(&tunnel_id, &token) {
+    if !is_valid_tunnel_id(&tunnel_id) {
         let _ = out_tx.send(Message::Text(
             serde_json::to_string(&ControlMessage::RegisterAck {
                 ok: false,
-                reason: Some("invalid tunnel_id/token".to_string()),
+                reason: Some("invalid tunnel_id format".to_string()),
             })
             .unwrap_or_else(|_| "{}".to_string()),
         ));
-        warn!(%tunnel_id, "agent register rejected");
+        warn!(%tunnel_id, "agent register rejected: invalid tunnel_id format");
+        writer_task.abort();
+        return;
+    }
+
+    if !state.validate_token(&token) {
+        let _ = out_tx.send(Message::Text(
+            serde_json::to_string(&ControlMessage::RegisterAck {
+                ok: false,
+                reason: Some("invalid token".to_string()),
+            })
+            .unwrap_or_else(|_| "{}".to_string()),
+        ));
+        warn!(%tunnel_id, "agent register rejected: invalid token");
         writer_task.abort();
         return;
     }
 
     let connection_id = Uuid::new_v4();
-    state
-        .insert_agent(
+    let inserted = state
+        .insert_agent_if_absent(
             tunnel_id.clone(),
             AgentHandle {
                 connection_id,
@@ -75,6 +88,18 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
             },
         )
         .await;
+    if !inserted {
+        let _ = out_tx.send(Message::Text(
+            serde_json::to_string(&ControlMessage::RegisterAck {
+                ok: false,
+                reason: Some("tunnel_id already in use".to_string()),
+            })
+            .unwrap_or_else(|_| "{}".to_string()),
+        ));
+        warn!(%tunnel_id, "agent register rejected: tunnel_id already in use");
+        writer_task.abort();
+        return;
+    }
 
     let _ = out_tx.send(Message::Text(
         serde_json::to_string(&ControlMessage::RegisterAck {

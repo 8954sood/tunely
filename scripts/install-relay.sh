@@ -6,27 +6,21 @@ RUN_USER="tunely"
 RUN_GROUP="tunely"
 INSTALL_DIR="/opt/tunely"
 CONFIG_DIR="/etc/tunely"
+CONFIG_FILE_NAME="relay.yaml"
+EXAMPLE_FILE_NAME="relay.example.yaml"
 
 RELAY_BIN_SOURCE=""
 GITHUB_REPO="8954sood/tunely"
 VERSION="latest"
 ARCH="auto"
-LISTEN="0.0.0.0:8080"
-AUTH=""
-REQUEST_TIMEOUT_SECS="60"
 TMP_DIR=""
 
 usage() {
   cat <<USAGE
 Usage:
-  sudo ./install-relay.sh --auth <tunnel=token[,tunnel2=token2]> [options]
-
-Required:
-  --auth <value>                 Example: demo=xxx,foo=bar
+  sudo ./install-relay.sh [options]
 
 Options:
-  --listen <host:port>           Default: 0.0.0.0:8080
-  --request-timeout-secs <sec>   Default: 60
   --binary <path>                relay-server binary path
   --repo <owner/repo>            Default: 8954sood/tunely
   --version <tag|latest>         Default: latest
@@ -130,18 +124,6 @@ resolve_binary() {
 parse_args() {
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --auth)
-        AUTH="${2:-}"
-        shift 2
-        ;;
-      --listen)
-        LISTEN="${2:-}"
-        shift 2
-        ;;
-      --request-timeout-secs)
-        REQUEST_TIMEOUT_SECS="${2:-}"
-        shift 2
-        ;;
       --binary)
         RELAY_BIN_SOURCE="${2:-}"
         shift 2
@@ -178,12 +160,6 @@ parse_args() {
     esac
   done
 
-  if [[ -z "${AUTH}" ]]; then
-    echo "[ERROR] --auth is required"
-    usage
-    exit 1
-  fi
-
   resolve_binary
 
   if [[ ! -x "${RELAY_BIN_SOURCE}" ]]; then
@@ -197,17 +173,39 @@ ensure_user() {
   fi
 }
 
+ensure_config_files() {
+  local config_file="${CONFIG_DIR}/${CONFIG_FILE_NAME}"
+  local example_file="${CONFIG_DIR}/${EXAMPLE_FILE_NAME}"
+
+  if [[ ! -f "${example_file}" ]]; then
+    cat > "${example_file}" <<YAML
+# Tunely relay configuration example
+# listen: "0.0.0.0:8080"
+# auth_tokens:
+#   - "xxx"
+#   - "yyy"
+# request_timeout_secs: 60
+YAML
+  fi
+
+  if [[ ! -f "${config_file}" ]]; then
+    : > "${config_file}"
+  fi
+}
+
+has_meaningful_yaml_content() {
+  local file="$1"
+  grep -Eq '^[[:space:]]*[^#[:space:]]' "${file}"
+}
+
 install_files() {
+  local config_file="${CONFIG_DIR}/${CONFIG_FILE_NAME}"
+
   install -d -m 0755 "${INSTALL_DIR}"
   install -d -m 0750 "${CONFIG_DIR}"
 
   install -m 0755 "${RELAY_BIN_SOURCE}" "${INSTALL_DIR}/relay-server"
-
-  cat > "${CONFIG_DIR}/relay.env" <<ENV
-LISTEN=${LISTEN}
-AUTH=${AUTH}
-REQUEST_TIMEOUT_SECS=${REQUEST_TIMEOUT_SECS}
-ENV
+  ensure_config_files
 
   cat > "/etc/systemd/system/${SERVICE_NAME}.service" <<UNIT
 [Unit]
@@ -219,8 +217,7 @@ Wants=network-online.target
 Type=simple
 User=${RUN_USER}
 Group=${RUN_GROUP}
-EnvironmentFile=${CONFIG_DIR}/relay.env
-ExecStart=${INSTALL_DIR}/relay-server --listen \${LISTEN} --auth \${AUTH} --request-timeout-secs \${REQUEST_TIMEOUT_SECS}
+ExecStart=${INSTALL_DIR}/relay-server --config ${config_file}
 Restart=always
 RestartSec=2
 NoNewPrivileges=true
@@ -236,29 +233,38 @@ UNIT
   chown -R "${RUN_USER}:${RUN_GROUP}" "${INSTALL_DIR}" "${CONFIG_DIR}"
 }
 
-start_service() {
+start_service_if_config_ready() {
+  local config_file="${CONFIG_DIR}/${CONFIG_FILE_NAME}"
+
   systemctl daemon-reload
-  systemctl enable --now "${SERVICE_NAME}.service"
+  systemctl enable "${SERVICE_NAME}.service"
+
+  if has_meaningful_yaml_content "${config_file}"; then
+    systemctl restart "${SERVICE_NAME}.service"
+    echo "[OK] ${SERVICE_NAME}.service started"
+  else
+    echo "[INFO] ${config_file} is empty (or comments only); service was enabled but not started"
+  fi
 }
 
 print_summary() {
-  local first_tunnel="${AUTH%%=*}"
-  first_tunnel="${first_tunnel%%,*}"
+  local config_file="${CONFIG_DIR}/${CONFIG_FILE_NAME}"
+  local example_file="${CONFIG_DIR}/${EXAMPLE_FILE_NAME}"
 
   echo
   echo "[OK] relay installed"
   echo "  service : ${SERVICE_NAME}.service"
   echo "  binary  : ${INSTALL_DIR}/relay-server"
-  echo "  env     : ${CONFIG_DIR}/relay.env"
+  echo "  config  : ${config_file}"
+  echo "  example : ${example_file}"
   echo
-  echo "Check status:"
+  echo "Next steps:"
+  echo "  1) Fill ${config_file} (use ${example_file} as reference)"
+  echo "  2) Start relay: systemctl start ${SERVICE_NAME}"
+  echo
+  echo "Check status/logs:"
   echo "  systemctl status ${SERVICE_NAME}"
   echo "  journalctl -u ${SERVICE_NAME} -f"
-  echo
-  if [[ -n "${first_tunnel}" ]]; then
-    echo "Client URL pattern:"
-    echo "  http://<relay-ip-or-domain>:${LISTEN##*:}/t/${first_tunnel}/"
-  fi
 }
 
 main() {
@@ -267,7 +273,7 @@ main() {
   parse_args "$@"
   ensure_user
   install_files
-  start_service
+  start_service_if_config_ready
   print_summary
 }
 
