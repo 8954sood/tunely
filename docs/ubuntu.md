@@ -17,15 +17,13 @@ curl -fsSL https://raw.githubusercontent.com/8954sood/tunely/main/scripts/instal
 
 설치 후 생성 파일:
 
-- 실제 설정 파일(빈 파일): `/etc/tunely/relay.yaml`
-- 주석 예제 파일: `/etc/tunely/relay.example.yaml`
+- 설정 파일(주석 템플릿 포함): `/etc/tunely/relay.yaml`
 
-`relay.yaml`이 비어 있으면 서비스는 자동 시작하지 않습니다.
+`relay.yaml`이 주석만 있거나 비어 있으면 서비스는 자동 시작하지 않습니다.
 
 ### Relay 설정 입력
 
 ```bash
-sudo cp /etc/tunely/relay.example.yaml /tmp/relay.example.yaml
 sudo vi /etc/tunely/relay.yaml
 ```
 
@@ -78,15 +76,15 @@ curl -fsSL https://raw.githubusercontent.com/8954sood/tunely/main/scripts/instal
 설치 후 수동 실행:
 
 ```bash
-/opt/tunely/relay-server --config /etc/tunely/relay.yaml
-/opt/tunely/agent --relay ws://<RELAY_PUBLIC_IP_OR_DOMAIN>:8080/ws --tunnel-id demo --token xxx --local http://127.0.0.1:3000
+tunely relay --config /etc/tunely/relay.yaml
+tunely agent --relay ws://<RELAY_PUBLIC_IP_OR_DOMAIN>:8080/ws --tunnel-id demo --token xxx --local http://127.0.0.1:3000
 ```
 
 ## 2) 버전 고정 설치 (선택)
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/8954sood/tunely/main/scripts/install-relay.sh | \
-  sudo bash -s -- --version v0.1.0
+  sudo bash -s -- --version v0.2.0
 ```
 
 ```bash
@@ -127,13 +125,13 @@ curl -fsSL https://raw.githubusercontent.com/8954sood/tunely/main/scripts/uninst
 ### Relay
 
 ```bash
-./relay-server --config /etc/tunely/relay.yaml
+tunely relay --config /etc/tunely/relay.yaml
 ```
 
 ### Agent
 
 ```bash
-./agent \
+tunely agent \
   --relay ws://<RELAY_PUBLIC_IP_OR_DOMAIN>:8080/ws \
   --tunnel-id demo \
   --token xxx \

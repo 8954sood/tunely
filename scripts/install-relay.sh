@@ -7,9 +7,9 @@ RUN_GROUP="tunely"
 INSTALL_DIR="/opt/tunely"
 CONFIG_DIR="/etc/tunely"
 CONFIG_FILE_NAME="relay.yaml"
-EXAMPLE_FILE_NAME="relay.example.yaml"
 
 RELAY_BIN_SOURCE=""
+TUNELY_BIN_SOURCE=""
 GITHUB_REPO="8954sood/tunely"
 VERSION="latest"
 ARCH="auto"
@@ -24,6 +24,7 @@ Usage:
 
 Options:
   --binary <path>                relay-server binary path
+  --tunely-binary <path>         tunely binary path
   --repo <owner/repo>            Default: 8954sood/tunely
   --version <tag|latest>         Default: latest
   --arch <amd64|arm64|auto>      Default: auto
@@ -143,6 +144,40 @@ resolve_binary() {
     echo "[ERROR] relay-server binary not found in downloaded archive"
     exit 1
   fi
+
+  if [[ -z "${TUNELY_BIN_SOURCE}" ]]; then
+    if [[ -f "${TMP_DIR}/tunely-linux-${ARCH}/tunely" ]]; then
+      TUNELY_BIN_SOURCE="${TMP_DIR}/tunely-linux-${ARCH}/tunely"
+    else
+      TUNELY_BIN_SOURCE="$(find "${TMP_DIR}" -type f -name tunely | head -n 1)"
+    fi
+  fi
+}
+
+resolve_tunely_binary() {
+  if [[ -n "${TUNELY_BIN_SOURCE}" ]]; then
+    if [[ ! -f "${TUNELY_BIN_SOURCE}" ]]; then
+      echo "[ERROR] tunely binary not found: ${TUNELY_BIN_SOURCE}"
+      exit 1
+    fi
+    return
+  fi
+
+  local relay_dir
+  relay_dir="$(dirname "${RELAY_BIN_SOURCE}")"
+  if [[ -f "${relay_dir}/tunely" ]]; then
+    TUNELY_BIN_SOURCE="${relay_dir}/tunely"
+    return
+  fi
+
+  if [[ -f "${INSTALL_DIR}/tunely" ]]; then
+    TUNELY_BIN_SOURCE="${INSTALL_DIR}/tunely"
+    return
+  fi
+
+  echo "[ERROR] tunely binary not found (expected in release archive)."
+  echo "[ERROR] Pass --tunely-binary <path> explicitly if needed."
+  exit 1
 }
 
 parse_args() {
@@ -150,6 +185,10 @@ parse_args() {
     case "$1" in
       --binary)
         RELAY_BIN_SOURCE="${2:-}"
+        shift 2
+        ;;
+      --tunely-binary)
+        TUNELY_BIN_SOURCE="${2:-}"
         shift 2
         ;;
       --repo)
@@ -189,9 +228,13 @@ parse_args() {
   done
 
   resolve_binary
+  resolve_tunely_binary
 
   if [[ ! -x "${RELAY_BIN_SOURCE}" ]]; then
     chmod +x "${RELAY_BIN_SOURCE}"
+  fi
+  if [[ ! -x "${TUNELY_BIN_SOURCE}" ]]; then
+    chmod +x "${TUNELY_BIN_SOURCE}"
   fi
 }
 
@@ -203,21 +246,18 @@ ensure_user() {
 
 ensure_config_files() {
   local config_file="${CONFIG_DIR}/${CONFIG_FILE_NAME}"
-  local example_file="${CONFIG_DIR}/${EXAMPLE_FILE_NAME}"
 
-  if [[ ! -f "${example_file}" ]]; then
-    cat > "${example_file}" <<YAML
-# Tunely relay configuration example
+  if [[ ! -f "${config_file}" ]]; then
+    cat > "${config_file}" <<YAML
+# Tunely relay config
+# Remove '#' and edit values to enable service start.
+#
 # listen: "0.0.0.0:8080"
 # auth_tokens:
 #   - "xxx"
 #   - "yyy"
 # request_timeout_secs: 60
 YAML
-  fi
-
-  if [[ ! -f "${config_file}" ]]; then
-    : > "${config_file}"
   fi
 }
 
@@ -239,7 +279,7 @@ Wants=network-online.target
 Type=simple
 User=${RUN_USER}
 Group=${RUN_GROUP}
-ExecStart=${INSTALL_DIR}/relay-server --config ${config_file}
+ExecStart=${INSTALL_DIR}/tunely relay --config ${config_file}
 Restart=always
 RestartSec=2
 NoNewPrivileges=true
@@ -258,6 +298,8 @@ install_files() {
   install -d -m 0750 "${CONFIG_DIR}"
 
   install -m 0755 "${RELAY_BIN_SOURCE}" "${INSTALL_DIR}/relay-server"
+  install -m 0755 "${TUNELY_BIN_SOURCE}" "${INSTALL_DIR}/tunely"
+  ln -sf "${INSTALL_DIR}/tunely" /usr/local/bin/tunely
   ensure_config_files
 
   if [[ "${SYSTEMD_ENABLED}" == "true" ]]; then
@@ -287,19 +329,19 @@ start_service_if_config_ready() {
 
 print_summary() {
   local config_file="${CONFIG_DIR}/${CONFIG_FILE_NAME}"
-  local example_file="${CONFIG_DIR}/${EXAMPLE_FILE_NAME}"
 
   echo
   echo "[OK] relay installed"
+  echo "  command : /usr/local/bin/tunely"
+  echo "  tunely  : ${INSTALL_DIR}/tunely"
   echo "  binary  : ${INSTALL_DIR}/relay-server"
   echo "  config  : ${config_file}"
-  echo "  example : ${example_file}"
 
   if [[ "${SYSTEMD_ENABLED}" == "true" ]]; then
     echo "  service : ${SERVICE_NAME}.service"
     echo
     echo "Next steps:"
-    echo "  1) Fill ${config_file} (use ${example_file} as reference)"
+    echo "  1) Fill ${config_file} (remove '#' from required keys)"
     echo "  2) Start relay: systemctl start ${SERVICE_NAME}"
     echo
     echo "Check status/logs:"
@@ -308,7 +350,7 @@ print_summary() {
   else
     echo
     echo "systemd not in use. Run manually after filling config:"
-    echo "  ${INSTALL_DIR}/relay-server --config ${config_file}"
+    echo "  tunely relay --config ${config_file}"
   fi
 }
 

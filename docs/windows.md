@@ -10,19 +10,20 @@ GitHub Actions 아티팩트 `tunely-windows-x64.zip`을 다운로드 후 압축 
 
 압축 해제 후 파일:
 
+- `tunely.exe`
 - `relay-server.exe`
 - `agent.exe`
 
 ## 2) Relay 서버 실행 (PowerShell)
 
 ```powershell
-.\relay-server.exe --listen 0.0.0.0:8080 --auth-token xxx,yyy
+.\tunely.exe relay --listen 0.0.0.0:8080 --auth-token xxx,yyy
 ```
 
 ## 3) Agent 실행 (PowerShell)
 
 ```powershell
-.\agent.exe `
+.\tunely.exe agent `
   --relay ws://<RELAY_PUBLIC_IP_OR_DOMAIN>:8080/ws `
   --tunnel-id demo `
   --token xxx `

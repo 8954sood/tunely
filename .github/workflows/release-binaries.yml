@@ -33,11 +33,12 @@ jobs:
 
       - name: Build linux binaries
         run: |
-          cross build --release --target ${{ matrix.target }} -p relay-server -p agent
+          cross build --release --target ${{ matrix.target }} -p tunely -p relay-server -p agent
 
       - name: Package linux archive
         run: |
           mkdir -p dist/tunely-linux-${{ matrix.arch_name }}
+          cp target/${{ matrix.target }}/release/tunely dist/tunely-linux-${{ matrix.arch_name }}/
           cp target/${{ matrix.target }}/release/relay-server dist/tunely-linux-${{ matrix.arch_name }}/
           cp target/${{ matrix.target }}/release/agent dist/tunely-linux-${{ matrix.arch_name }}/
           cp README.md dist/tunely-linux-${{ matrix.arch_name }}/
@@ -64,12 +65,13 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Build windows x64 binaries
-        run: cargo build --release --target x86_64-pc-windows-msvc -p relay-server -p agent
+        run: cargo build --release --target x86_64-pc-windows-msvc -p tunely -p relay-server -p agent
 
       - name: Package windows x64 archive
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path dist/tunely-windows-x64 | Out-Null
+          Copy-Item target/x86_64-pc-windows-msvc/release/tunely.exe dist/tunely-windows-x64/
           Copy-Item target/x86_64-pc-windows-msvc/release/relay-server.exe dist/tunely-windows-x64/
           Copy-Item target/x86_64-pc-windows-msvc/release/agent.exe dist/tunely-windows-x64/
           Copy-Item README.md dist/tunely-windows-x64/

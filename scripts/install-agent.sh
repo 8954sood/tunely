@@ -8,6 +8,7 @@ INSTALL_DIR="/opt/tunely"
 CONFIG_DIR="/etc/tunely"
 
 AGENT_BIN_SOURCE=""
+TUNELY_BIN_SOURCE=""
 GITHUB_REPO="8954sood/tunely"
 VERSION="latest"
 ARCH="auto"
@@ -37,6 +38,7 @@ Options:
   --ping-interval-secs <sec>     Default: 20
   --max-backoff-secs <sec>       Default: 30
   --binary <path>                agent binary path
+  --tunely-binary <path>         tunely binary path
   --repo <owner/repo>            Default: 8954sood/tunely
   --version <tag|latest>         Default: latest
   --arch <amd64|arm64|auto>      Default: auto
@@ -156,6 +158,40 @@ resolve_binary() {
     echo "[ERROR] agent binary not found in downloaded archive"
     exit 1
   fi
+
+  if [[ -z "${TUNELY_BIN_SOURCE}" ]]; then
+    if [[ -f "${TMP_DIR}/tunely-linux-${ARCH}/tunely" ]]; then
+      TUNELY_BIN_SOURCE="${TMP_DIR}/tunely-linux-${ARCH}/tunely"
+    else
+      TUNELY_BIN_SOURCE="$(find "${TMP_DIR}" -type f -name tunely | head -n 1)"
+    fi
+  fi
+}
+
+resolve_tunely_binary() {
+  if [[ -n "${TUNELY_BIN_SOURCE}" ]]; then
+    if [[ ! -f "${TUNELY_BIN_SOURCE}" ]]; then
+      echo "[ERROR] tunely binary not found: ${TUNELY_BIN_SOURCE}"
+      exit 1
+    fi
+    return
+  fi
+
+  local agent_dir
+  agent_dir="$(dirname "${AGENT_BIN_SOURCE}")"
+  if [[ -f "${agent_dir}/tunely" ]]; then
+    TUNELY_BIN_SOURCE="${agent_dir}/tunely"
+    return
+  fi
+
+  if [[ -f "${INSTALL_DIR}/tunely" ]]; then
+    TUNELY_BIN_SOURCE="${INSTALL_DIR}/tunely"
+    return
+  fi
+
+  echo "[ERROR] tunely binary not found (expected in release archive)."
+  echo "[ERROR] Pass --tunely-binary <path> explicitly if needed."
+  exit 1
 }
 
 parse_args() {
@@ -187,6 +223,10 @@ parse_args() {
         ;;
       --binary)
         AGENT_BIN_SOURCE="${2:-}"
+        shift 2
+        ;;
+      --tunely-binary)
+        TUNELY_BIN_SOURCE="${2:-}"
         shift 2
         ;;
       --repo)
@@ -232,9 +272,13 @@ parse_args() {
   fi
 
   resolve_binary
+  resolve_tunely_binary
 
   if [[ ! -x "${AGENT_BIN_SOURCE}" ]]; then
     chmod +x "${AGENT_BIN_SOURCE}"
+  fi
+  if [[ ! -x "${TUNELY_BIN_SOURCE}" ]]; then
+    chmod +x "${TUNELY_BIN_SOURCE}"
   fi
 }
 
@@ -256,7 +300,7 @@ Type=simple
 User=${RUN_USER}
 Group=${RUN_GROUP}
 EnvironmentFile=${CONFIG_DIR}/agent.env
-ExecStart=${INSTALL_DIR}/agent --relay \${RELAY} --tunnel-id \${TUNNEL_ID} --token \${TOKEN} --local \${LOCAL} --ping-interval-secs \${PING_INTERVAL_SECS} --max-backoff-secs \${MAX_BACKOFF_SECS}
+ExecStart=${INSTALL_DIR}/tunely agent --relay \${RELAY} --tunnel-id \${TUNNEL_ID} --token \${TOKEN} --local \${LOCAL} --ping-interval-secs \${PING_INTERVAL_SECS} --max-backoff-secs \${MAX_BACKOFF_SECS}
 Restart=always
 RestartSec=2
 NoNewPrivileges=true
@@ -275,6 +319,8 @@ install_files() {
   install -d -m 0750 "${CONFIG_DIR}"
 
   install -m 0755 "${AGENT_BIN_SOURCE}" "${INSTALL_DIR}/agent"
+  install -m 0755 "${TUNELY_BIN_SOURCE}" "${INSTALL_DIR}/tunely"
+  ln -sf "${INSTALL_DIR}/tunely" /usr/local/bin/tunely
 
   cat > "${CONFIG_DIR}/agent.env" <<ENV
 RELAY=${RELAY}
@@ -304,6 +350,8 @@ start_service() {
 print_summary() {
   echo
   echo "[OK] agent installed"
+  echo "  command : /usr/local/bin/tunely"
+  echo "  tunely  : ${INSTALL_DIR}/tunely"
   echo "  binary  : ${INSTALL_DIR}/agent"
   echo "  env     : ${CONFIG_DIR}/agent.env"
 
@@ -316,7 +364,7 @@ print_summary() {
   else
     echo
     echo "systemd not in use. Run manually:"
-    echo "  ${INSTALL_DIR}/agent --relay ${RELAY} --tunnel-id ${TUNNEL_ID} --token ${TOKEN} --local ${LOCAL} --ping-interval-secs ${PING_INTERVAL_SECS} --max-backoff-secs ${MAX_BACKOFF_SECS}"
+    echo "  tunely agent --relay ${RELAY} --tunnel-id ${TUNNEL_ID} --token ${TOKEN} --local ${LOCAL} --ping-interval-secs ${PING_INTERVAL_SECS} --max-backoff-secs ${MAX_BACKOFF_SECS}"
   fi
 }
 

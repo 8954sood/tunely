@@ -28,5 +28,6 @@ fi
 
 rm -rf /opt/tunely
 rm -rf /etc/tunely
+rm -f /usr/local/bin/tunely
 
 echo "[OK] removed tunely services and files"
