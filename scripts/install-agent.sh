@@ -11,6 +11,8 @@ AGENT_BIN_SOURCE=""
 GITHUB_REPO="8954sood/tunely"
 VERSION="latest"
 ARCH="auto"
+SYSTEMD_MODE="auto"
+SYSTEMD_ENABLED="false"
 
 RELAY=""
 TUNNEL_ID=""
@@ -40,6 +42,7 @@ Options:
   --arch <amd64|arm64|auto>      Default: auto
   --install-dir <path>           Default: /opt/tunely
   --config-dir <path>            Default: /etc/tunely
+  --no-systemd                   Skip systemd service setup/start
   -h, --help                     Show help
 USAGE
 }
@@ -72,6 +75,27 @@ detect_arch() {
       exit 1
       ;;
   esac
+}
+
+has_systemd() {
+  command -v systemctl >/dev/null 2>&1 \
+    && [[ -d /run/systemd/system ]] \
+    && systemctl show-environment >/dev/null 2>&1
+}
+
+resolve_systemd_mode() {
+  if [[ "${SYSTEMD_MODE}" == "disabled" ]]; then
+    SYSTEMD_ENABLED="false"
+    return
+  fi
+
+  if has_systemd; then
+    SYSTEMD_ENABLED="true"
+  else
+    SYSTEMD_ENABLED="false"
+    echo "[INFO] systemd is not available; service setup will be skipped"
+    echo "[INFO] use --no-systemd to suppress this notice"
+  fi
 }
 
 download_file() {
@@ -185,6 +209,10 @@ parse_args() {
         CONFIG_DIR="${2:-}"
         shift 2
         ;;
+      --no-systemd)
+        SYSTEMD_MODE="disabled"
+        shift
+        ;;
       -h|--help)
         usage
         exit 0
@@ -216,21 +244,7 @@ ensure_user() {
   fi
 }
 
-install_files() {
-  install -d -m 0755 "${INSTALL_DIR}"
-  install -d -m 0750 "${CONFIG_DIR}"
-
-  install -m 0755 "${AGENT_BIN_SOURCE}" "${INSTALL_DIR}/agent"
-
-  cat > "${CONFIG_DIR}/agent.env" <<ENV
-RELAY=${RELAY}
-TUNNEL_ID=${TUNNEL_ID}
-TOKEN=${TOKEN}
-LOCAL=${LOCAL}
-PING_INTERVAL_SECS=${PING_INTERVAL_SECS}
-MAX_BACKOFF_SECS=${MAX_BACKOFF_SECS}
-ENV
-
+write_systemd_unit() {
   cat > "/etc/systemd/system/${SERVICE_NAME}.service" <<UNIT
 [Unit]
 Description=Tunely Agent
@@ -254,11 +268,35 @@ ReadWritePaths=${INSTALL_DIR} ${CONFIG_DIR}
 [Install]
 WantedBy=multi-user.target
 UNIT
+}
+
+install_files() {
+  install -d -m 0755 "${INSTALL_DIR}"
+  install -d -m 0750 "${CONFIG_DIR}"
+
+  install -m 0755 "${AGENT_BIN_SOURCE}" "${INSTALL_DIR}/agent"
+
+  cat > "${CONFIG_DIR}/agent.env" <<ENV
+RELAY=${RELAY}
+TUNNEL_ID=${TUNNEL_ID}
+TOKEN=${TOKEN}
+LOCAL=${LOCAL}
+PING_INTERVAL_SECS=${PING_INTERVAL_SECS}
+MAX_BACKOFF_SECS=${MAX_BACKOFF_SECS}
+ENV
+
+  if [[ "${SYSTEMD_ENABLED}" == "true" ]]; then
+    write_systemd_unit
+  fi
 
   chown -R "${RUN_USER}:${RUN_GROUP}" "${INSTALL_DIR}" "${CONFIG_DIR}"
 }
 
 start_service() {
+  if [[ "${SYSTEMD_ENABLED}" != "true" ]]; then
+    return
+  fi
+
   systemctl daemon-reload
   systemctl enable --now "${SERVICE_NAME}.service"
 }
@@ -266,19 +304,27 @@ start_service() {
 print_summary() {
   echo
   echo "[OK] agent installed"
-  echo "  service : ${SERVICE_NAME}.service"
   echo "  binary  : ${INSTALL_DIR}/agent"
   echo "  env     : ${CONFIG_DIR}/agent.env"
-  echo
-  echo "Check status:"
-  echo "  systemctl status ${SERVICE_NAME}"
-  echo "  journalctl -u ${SERVICE_NAME} -f"
+
+  if [[ "${SYSTEMD_ENABLED}" == "true" ]]; then
+    echo "  service : ${SERVICE_NAME}.service"
+    echo
+    echo "Check status:"
+    echo "  systemctl status ${SERVICE_NAME}"
+    echo "  journalctl -u ${SERVICE_NAME} -f"
+  else
+    echo
+    echo "systemd not in use. Run manually:"
+    echo "  ${INSTALL_DIR}/agent --relay ${RELAY} --tunnel-id ${TUNNEL_ID} --token ${TOKEN} --local ${LOCAL} --ping-interval-secs ${PING_INTERVAL_SECS} --max-backoff-secs ${MAX_BACKOFF_SECS}"
+  fi
 }
 
 main() {
   trap cleanup EXIT
   require_root
   parse_args "$@"
+  resolve_systemd_mode
   ensure_user
   install_files
   start_service

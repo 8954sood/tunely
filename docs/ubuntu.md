@@ -58,6 +58,30 @@ curl -fsSL https://raw.githubusercontent.com/8954sood/tunely/main/scripts/instal
     --local http://127.0.0.1:3000
 ```
 
+### Docker/WSL 등 non-systemd 환경
+
+systemd가 없는 환경에서는 `--no-systemd`를 사용하세요.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/8954sood/tunely/main/scripts/install-relay.sh | \
+  sudo bash -s -- --no-systemd
+
+curl -fsSL https://raw.githubusercontent.com/8954sood/tunely/main/scripts/install-agent.sh | \
+  sudo bash -s -- \
+    --no-systemd \
+    --relay ws://<RELAY_PUBLIC_IP_OR_DOMAIN>:8080/ws \
+    --tunnel-id demo \
+    --token xxx \
+    --local http://127.0.0.1:3000
+```
+
+설치 후 수동 실행:
+
+```bash
+/opt/tunely/relay-server --config /etc/tunely/relay.yaml
+/opt/tunely/agent --relay ws://<RELAY_PUBLIC_IP_OR_DOMAIN>:8080/ws --tunnel-id demo --token xxx --local http://127.0.0.1:3000
+```
+
 ## 2) 버전 고정 설치 (선택)
 
 ```bash
