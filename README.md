@@ -55,62 +55,92 @@ Rust로 구현한 경량 reverse tunnel MVP입니다.
 
 정의: `crates/protocol/src/frame.rs`
 
-## 실행 방법
+## 실행 가이드
 
-### 1) 로컬 앱 실행 (예시)
+운영체제별 실행 문서는 `docs/`로 분리되어 있습니다.
 
-```bash
-python3 -m http.server 3000
-```
-
-### 2) Relay 실행
-
-```bash
-cargo run -p relay-server -- --listen 127.0.0.1:8080 --auth demo=xxx
-```
-
-옵션:
-
-- `--listen` (기본 `0.0.0.0:8080`)
-- `--auth` 형식: `tunnel=token,tunnel2=token2`
-- `--request-timeout-secs` (기본 `60`)
-
-### 3) Agent 실행
-
-```bash
-cargo run -p agent -- \
-  --relay ws://127.0.0.1:8080/ws \
-  --tunnel-id demo \
-  --token xxx \
-  --local http://127.0.0.1:3000
-```
-
-옵션:
-
-- `--ping-interval-secs` (기본 `20`)
-- `--max-backoff-secs` (기본 `30`)
-
-### 4) 외부 요청
-
-```bash
-curl -v http://127.0.0.1:8080/t/demo/
-```
-
-`/t/demo`와 `/t/demo/` 둘 다 지원합니다.
-
-## 바이너리 전달 확인
-
-```bash
-# 로컬 3000 서버에 image.png가 있다고 가정
-curl -v http://127.0.0.1:8080/t/demo/image.png --output /tmp/out.png
-cmp image.png /tmp/out.png
-```
+- Ubuntu(amd64/arm64): [docs/ubuntu.md](docs/ubuntu.md)
+- Windows(x64): [docs/windows.md](docs/windows.md)
 
 ## 테스트
 
 ```bash
 cargo test --workspace
 ```
+
+## 단일 파일 배포 (Ubuntu amd64/arm64, Windows x64)
+
+Rust 바이너리라서 설치형 패키지 없이 실행 파일 1개로 실행할 수 있습니다.
+
+- `relay-server` 실행 파일 1개
+- `agent` 실행 파일 1개
+
+즉, 역할별로는 1파일 실행이 가능합니다(프로젝트 전체는 2개 바이너리).
+
+### GitHub Actions로 자동 빌드
+
+워크플로: `.github/workflows/release-binaries.yml`
+
+- 태그 푸시(`v*`) 또는 수동 실행 시 아래 아티팩트 생성
+- `tunely-linux-amd64.tar.gz`
+  - `relay-server` (x86_64-unknown-linux-musl, 정적 링크)
+  - `agent` (x86_64-unknown-linux-musl, 정적 링크)
+  - `install-relay.sh`, `install-agent.sh`, `uninstall-tunely.sh`
+- `tunely-linux-arm64.tar.gz`
+  - `relay-server` (aarch64-unknown-linux-musl, 정적 링크)
+  - `agent` (aarch64-unknown-linux-musl, 정적 링크)
+  - `install-relay.sh`, `install-agent.sh`, `uninstall-tunely.sh`
+- `tunely-windows-x64.zip`
+  - `relay-server.exe`
+  - `agent.exe`
+
+### 로컬에서 직접 빌드
+
+#### Ubuntu amd64/arm64 머신에서 직접 빌드
+
+```bash
+cargo build --release -p relay-server -p agent
+```
+
+결과:
+
+- `target/release/relay-server`
+- `target/release/agent`
+
+#### Linux/macOS에서 Ubuntu용 크로스 빌드 (amd64)
+
+```bash
+cargo install cross --git https://github.com/cross-rs/cross
+cross build --release --target x86_64-unknown-linux-musl -p relay-server -p agent
+```
+
+결과:
+
+- `target/x86_64-unknown-linux-musl/release/relay-server`
+- `target/x86_64-unknown-linux-musl/release/agent`
+
+#### Linux/macOS에서 Ubuntu용 크로스 빌드 (arm64)
+
+```bash
+cargo install cross --git https://github.com/cross-rs/cross
+cross build --release --target aarch64-unknown-linux-musl -p relay-server -p agent
+```
+
+결과:
+
+- `target/aarch64-unknown-linux-musl/release/relay-server`
+- `target/aarch64-unknown-linux-musl/release/agent`
+
+#### Windows에서 빌드
+
+```powershell
+cargo build --release --target x86_64-pc-windows-msvc -p relay-server -p agent
+```
+
+결과:
+
+- `target/x86_64-pc-windows-msvc/release/relay-server.exe`
+- `target/x86_64-pc-windows-msvc/release/agent.exe`
 
 ## 트러블슈팅
 

@@ -15,6 +15,7 @@ use tokio::{
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{error, info, warn};
+use url::Url;
 use uuid::Uuid;
 
 use crate::{
@@ -50,7 +51,11 @@ async fn run_once(config: &Config) -> anyhow::Result<()> {
 
     send_register(&mut ws_writer, config).await?;
     wait_register_ack(&mut ws_reader).await?;
-    info!(tunnel_id = %config.tunnel_id, "agent registered");
+    if let Some(public_url) = derive_public_tunnel_url(&config.relay, &config.tunnel_id) {
+        info!(tunnel_id = %config.tunnel_id, %public_url, "agent registered; client access URL");
+    } else {
+        info!(tunnel_id = %config.tunnel_id, "agent registered");
+    }
 
     let (out_tx, mut out_rx) = mpsc::unbounded_channel::<Message>();
     let writer_task = tokio::spawn(async move {
@@ -326,13 +331,50 @@ fn backoff_with_jitter(attempt: u32, max_backoff_secs: u64) -> Duration {
     Duration::from_secs(base_secs) + Duration::from_millis(jitter_ms)
 }
 
+fn derive_public_tunnel_url(relay_url: &str, tunnel_id: &str) -> Option<String> {
+    let mut url = Url::parse(relay_url).ok()?;
+    let scheme = match url.scheme() {
+        "ws" => "http",
+        "wss" => "https",
+        "http" => "http",
+        "https" => "https",
+        _ => return None,
+    };
+    url.set_scheme(scheme).ok()?;
+
+    let relay_path = url.path().trim_end_matches('/');
+    let base_path = relay_path.strip_suffix("/ws").unwrap_or("");
+    let tunnel_path = if base_path.is_empty() {
+        format!("/t/{tunnel_id}/")
+    } else {
+        format!("{base_path}/t/{tunnel_id}/")
+    };
+
+    url.set_path(&tunnel_path);
+    url.set_query(None);
+    url.set_fragment(None);
+    Some(url.to_string())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::backoff_with_jitter;
+    use super::{backoff_with_jitter, derive_public_tunnel_url};
 
     #[test]
     fn backoff_is_bounded() {
         let d = backoff_with_jitter(99, 30);
         assert!(d.as_secs() <= 30);
+    }
+
+    #[test]
+    fn derive_public_url_from_ws() {
+        let url = derive_public_tunnel_url("ws://127.0.0.1:8080/ws", "demo").expect("url");
+        assert_eq!(url, "http://127.0.0.1:8080/t/demo/");
+    }
+
+    #[test]
+    fn derive_public_url_with_prefix_path() {
+        let url = derive_public_tunnel_url("wss://relay.example.com/proxy/ws", "demo").expect("url");
+        assert_eq!(url, "https://relay.example.com/proxy/t/demo/");
     }
 }

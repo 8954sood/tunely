@@ -1,0 +1,80 @@
+name: release-binaries
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch_name: amd64
+            target: x86_64-unknown-linux-musl
+          - arch_name: arm64
+            target: aarch64-unknown-linux-musl
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cross
+        run: cargo install cross --git https://github.com/cross-rs/cross
+
+      - name: Build linux binaries
+        run: |
+          cross build --release --target ${{ matrix.target }} -p relay-server -p agent
+
+      - name: Package linux archive
+        run: |
+          mkdir -p dist/tunely-linux-${{ matrix.arch_name }}
+          cp target/${{ matrix.target }}/release/relay-server dist/tunely-linux-${{ matrix.arch_name }}/
+          cp target/${{ matrix.target }}/release/agent dist/tunely-linux-${{ matrix.arch_name }}/
+          cp README.md dist/tunely-linux-${{ matrix.arch_name }}/
+          cp docs/ubuntu.md dist/tunely-linux-${{ matrix.arch_name }}/
+          cp scripts/install-relay.sh dist/tunely-linux-${{ matrix.arch_name }}/
+          cp scripts/install-agent.sh dist/tunely-linux-${{ matrix.arch_name }}/
+          cp scripts/uninstall-tunely.sh dist/tunely-linux-${{ matrix.arch_name }}/
+          tar -C dist -czf dist/tunely-linux-${{ matrix.arch_name }}.tar.gz tunely-linux-${{ matrix.arch_name }}
+
+      - name: Upload linux artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tunely-linux-${{ matrix.arch_name }}
+          path: dist/tunely-linux-${{ matrix.arch_name }}.tar.gz
+
+  build-windows-x64:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build windows x64 binaries
+        run: cargo build --release --target x86_64-pc-windows-msvc -p relay-server -p agent
+
+      - name: Package windows x64 archive
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist/tunely-windows-x64 | Out-Null
+          Copy-Item target/x86_64-pc-windows-msvc/release/relay-server.exe dist/tunely-windows-x64/
+          Copy-Item target/x86_64-pc-windows-msvc/release/agent.exe dist/tunely-windows-x64/
+          Copy-Item README.md dist/tunely-windows-x64/
+          Copy-Item docs/windows.md dist/tunely-windows-x64/
+          Compress-Archive -Path dist/tunely-windows-x64/* -DestinationPath dist/tunely-windows-x64.zip -Force
+
+      - name: Upload windows x64 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tunely-windows-x64
+          path: dist/tunely-windows-x64.zip
