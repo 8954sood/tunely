@@ -2,9 +2,12 @@ name: release-binaries
 
 on:
   workflow_dispatch:
-  push:
-    tags:
-      - "v*"
+  release:
+    types:
+      - published
+
+permissions:
+  contents: write
 
 jobs:
   build-linux:
@@ -78,3 +81,28 @@ jobs:
         with:
           name: tunely-windows-x64
           path: dist/tunely-windows-x64.zip
+
+  release:
+    if: github.event_name == 'release'
+    needs: [build-linux, build-windows-x64]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: tunely-*
+          merge-multiple: true
+          path: dist
+
+      - name: List release files
+        run: ls -lah dist
+
+      - name: Upload assets to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.release.tag_name }}
+          files: |
+            dist/*.tar.gz
+            dist/*.zip
+          generate_release_notes: true
