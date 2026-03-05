@@ -5,9 +5,9 @@ relay는 내부 포트(`127.0.0.1:8080`)에서만 동작하게 운영할 수 있
 
 권장 흐름:
 
-- Client -> `https://tunnel.example.com` (Caddy)
+- 클라이언트 -> `https://tunnel.example.com` (Caddy)
 - Caddy -> `http://127.0.0.1:8080` (`relay-server`)
-- Agent -> `wss://tunnel.example.com/ws`
+- 에이전트 -> `wss://tunnel.example.com/ws`
 
 ## 1) Relay를 내부 포트로 실행
 
@@ -90,9 +90,7 @@ sudo ufw allow 443/tcp
 sudo ufw deny 8080/tcp
 ```
 
-## 6) 자주 하는 실수
+## 6) 관련 문서
 
-- `/ws` 프록시 누락: agent가 연결 실패
-- `/t/*` 프록시 누락: 클라이언트 요청 404/502
-- 도메인 DNS 미설정: TLS 발급 실패
-- relay를 `0.0.0.0:8080`로 열어두고 방화벽 미설정: 불필요한 노출
+- 트러블슈팅: [troubleshooting.md](troubleshooting.md)
+- Ubuntu 설치/실행: [ubuntu.md](ubuntu.md)

@@ -1,83 +1,25 @@
 # Tunely
 
-Rust로 구현한 경량 reverse tunnel MVP입니다.
+Tunely는 Rust로 구현한 경량 reverse tunnel MVP입니다.
 
-- 로컬 `agent`가 먼저 `relay-server`에 outbound WebSocket 연결
-- 외부 HTTP 요청을 `relay-server`가 `tunnel_id` 기준으로 agent에 전달
-- agent가 `localhost`로 프록시하고 응답을 relay를 통해 반환
-- 바이너리 바디(이미지/파일) 포함 전달 가능
+- Agent가 relay에 outbound WebSocket 연결을 맺고 유지
+- Relay가 외부 HTTP 요청을 `tunnel_id` 기준으로 agent에 전달
+- Agent가 로컬 서버(`localhost`)로 프록시 후 응답 반환
+- 바이너리 바디(이미지/파일) 전달 지원
 
-## 구성
-
-워크스페이스는 4개 크레이트로 구성됩니다.
-
-- `crates/tunely`: 통합 CLI 엔트리포인트 (`tunely relay|agent|help`)
-- `crates/protocol`: relay-agent 공통 메시지/프레임 타입
-- `crates/relay-server`: 공인 진입점(HTTP + WebSocket)
-- `crates/agent`: 로컬 포워딩 클라이언트
-
-## 핵심 동작
-
-1. Agent가 `/ws`로 접속 후 `RegisterAgent { tunnel_id, token }` 전송
-2. Relay가 토큰 검증 후 tunnel_id를 동적으로 세션 등록
-3. 외부 요청 `http://relay/t/<tunnel_id>/...` 수신
-4. Relay가 `request_id` 생성 후 `HttpRequestStart` + request body chunk 전송
-5. Agent가 로컬 서버로 요청 전달 (`reqwest`)
-6. Agent가 `HttpResponseStart` + response body chunk + `HttpResponseEnd` 전송
-7. Relay가 외부 클라이언트로 스트리밍 응답
-
-## 프로토콜
-
-### Control message (JSON text frame)
-
-- `register_agent`
-- `register_ack`
-- `http_request_start`
-- `http_request_end`
-- `http_response_start`
-- `http_response_end`
-- `error`
-- `ping` / `pong`
-
-정의: `crates/protocol/src/message.rs`
-
-### Body chunk (WebSocket binary frame)
-
-바디는 JSON이 아닌 raw bytes로 전송합니다.
-
-헤더 포맷:
-
-- `version: u8`
-- `stream_kind: u8` (`0=request_body`, `1=response_body`)
-- `request_id: [u8;16]` (UUID)
-- `seq: u32 (BE)`
-- `flags: u8` (`bit0=fin`)
-- `payload: [u8]`
-
-정의: `crates/protocol/src/frame.rs`
-
-## 실행 가이드
-
-운영체제별 실행 문서는 `docs/`로 분리되어 있습니다.
-
-- Ubuntu(amd64/arm64): [docs/ubuntu.md](docs/ubuntu.md)
-- Windows(x64): [docs/windows.md](docs/windows.md)
-- Caddy(Reverse Proxy/TLS): [docs/caddy.md](docs/caddy.md)
-
-기본 실행 명령:
+## 빠른 시작
 
 ```bash
 tunely help
 tunely relay --config /etc/tunely/relay.yaml
 tunely agent --relay ws://127.0.0.1:8080/ws --tunnel-id demo --token xxx --local http://127.0.0.1:3000
+curl -v http://127.0.0.1:8080/t/demo/
 ```
 
-## Relay 설정 파일 (YAML)
+Relay 설정 파일:
 
-Relay는 파일 설정을 지원합니다.
-
-- 기본 경로: `/etc/tunely/relay.yaml`
-- 파일이 없으면 설치 스크립트가 `/etc/tunely/relay.yaml`에 주석 템플릿을 생성
+- 경로: `/etc/tunely/relay.yaml`
+- 파일이 없으면 설치 스크립트가 주석 템플릿으로 생성
 
 예시:
 
@@ -89,11 +31,30 @@ auth_tokens:
 request_timeout_secs: 60
 ```
 
-실행:
+## 문서
 
-```bash
-tunely relay --config /etc/tunely/relay.yaml
-```
+- Ubuntu 설치/실행: [docs/ubuntu.md](docs/ubuntu.md)
+- Windows 실행: [docs/windows.md](docs/windows.md)
+- Caddy 설정: [docs/caddy.md](docs/caddy.md)
+- 빌드/릴리즈: [docs/build-and-release.md](docs/build-and-release.md)
+- 트러블슈팅: [docs/troubleshooting.md](docs/troubleshooting.md)
+
+## 워크스페이스
+
+- `crates/tunely`: 통합 CLI (`tunely relay|agent|help`)
+- `crates/protocol`: relay-agent 공통 프로토콜 타입
+- `crates/relay-server`: HTTP ingress + WebSocket relay
+- `crates/agent`: 로컬 포워딩 클라이언트
+
+## 프로토콜
+
+- 제어 메시지(JSON text frame): `register_agent`, `http_request_start`, `http_response_start`, `ping/pong` 등
+- 바디 전송(binary frame): 스트림 메타데이터를 포함한 raw payload chunk
+
+정의 위치:
+
+- `crates/protocol/src/message.rs`
+- `crates/protocol/src/frame.rs`
 
 ## 테스트
 
@@ -101,122 +62,10 @@ tunely relay --config /etc/tunely/relay.yaml
 cargo test --workspace
 ```
 
-## 단일 파일 배포 (Ubuntu amd64/arm64, Windows x64)
-
-Rust 바이너리라서 설치형 패키지 없이 실행 가능합니다.
-
-- 기본 엔트리포인트: `tunely`
-- 하위호환 바이너리: `relay-server`, `agent`
-
-### GitHub Actions로 자동 빌드
-
-워크플로: `.github/workflows/release-binaries.yml`
-
-- Release 발행(published) 또는 수동 실행 시 아래 아티팩트 생성
-- `tunely-linux-amd64.tar.gz`
-  - `tunely` (통합 CLI)
-  - `relay-server` (x86_64-unknown-linux-musl, 정적 링크)
-  - `agent` (x86_64-unknown-linux-musl, 정적 링크)
-  - `install-relay.sh`, `install-agent.sh`, `uninstall-tunely.sh`
-- `tunely-linux-arm64.tar.gz`
-  - `tunely` (통합 CLI)
-  - `relay-server` (aarch64-unknown-linux-musl, 정적 링크)
-  - `agent` (aarch64-unknown-linux-musl, 정적 링크)
-  - `install-relay.sh`, `install-agent.sh`, `uninstall-tunely.sh`
-- `tunely-windows-x64.zip`
-  - `tunely.exe`
-  - `relay-server.exe`
-  - `agent.exe`
-
-### 로컬에서 직접 빌드
-
-#### Ubuntu amd64/arm64 머신에서 직접 빌드
-
-```bash
-cargo build --release -p tunely -p relay-server -p agent
-```
-
-결과:
-
-- `target/release/tunely`
-- `target/release/relay-server`
-- `target/release/agent`
-
-#### Linux/macOS에서 Ubuntu용 크로스 빌드 (amd64)
-
-```bash
-cargo install cross --git https://github.com/cross-rs/cross
-cross build --release --target x86_64-unknown-linux-musl -p tunely -p relay-server -p agent
-```
-
-결과:
-
-- `target/x86_64-unknown-linux-musl/release/tunely`
-- `target/x86_64-unknown-linux-musl/release/relay-server`
-- `target/x86_64-unknown-linux-musl/release/agent`
-
-#### Linux/macOS에서 Ubuntu용 크로스 빌드 (arm64)
-
-```bash
-cargo install cross --git https://github.com/cross-rs/cross
-cross build --release --target aarch64-unknown-linux-musl -p tunely -p relay-server -p agent
-```
-
-결과:
-
-- `target/aarch64-unknown-linux-musl/release/tunely`
-- `target/aarch64-unknown-linux-musl/release/relay-server`
-- `target/aarch64-unknown-linux-musl/release/agent`
-
-#### Windows에서 빌드
-
-```powershell
-cargo build --release --target x86_64-pc-windows-msvc -p tunely -p relay-server -p agent
-```
-
-결과:
-
-- `target/x86_64-pc-windows-msvc/release/tunely.exe`
-- `target/x86_64-pc-windows-msvc/release/relay-server.exe`
-- `target/x86_64-pc-windows-msvc/release/agent.exe`
-
-## 트러블슈팅
-
-### 1) `404 Not Found`가 나오는 경우
-
-- 요청 경로가 `http://<relay>/t/<tunnel_id>/...` 형식인지 확인
-- relay/agent를 **최신 코드로 재시작**했는지 확인
-
-### 2) `502 Bad Gateway`가 나오는 경우
-
-- 해당 `tunnel_id`로 연결된 agent가 없는 상태
-- agent 로그에서 `agent registered` 확인
-
-### 3) `register rejected: invalid token`
-
-- relay `auth_tokens` 목록에 agent의 `--token`이 포함되어야 함
-
-### 4) `register rejected: tunnel_id already in use`
-
-- 이미 같은 `tunnel_id`가 연결 중이면 신규 agent 연결이 거절됨
-- 기존 agent 연결이 끊긴 뒤에는 동일 `tunnel_id` 재연결 가능
-
-### 5) `Address already in use`
-
-- 포트 충돌입니다. 기존 프로세스를 종료하거나 다른 포트를 사용하세요.
-
-## 현재 MVP 범위
+## MVP 범위
 
 - HTTP reverse proxy tunnel
-- 단일 relay + 복수 tunnel 구조
-- tunnel-id 라우팅
-- shared secret 토큰 인증
-- 연결/요청/에러 기본 로깅
-
-## 향후 확장 포인트
-
-- WebSocket passthrough
-- HTTPS/WSS (TLS 종료)
-- 서브도메인 라우팅
-- TCP tunnel
-- 다중 relay 확장 및 영속 세션 관리
+- 단일 relay + 복수 agent
+- `tunnel_id` routing
+- shared secret token 인증
+- 기본 로깅(connect/reconnect/request/error)

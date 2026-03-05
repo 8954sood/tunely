@@ -4,17 +4,17 @@
 
 - `x64` (`x86_64`)
 
-## 1) 배포 아티팩트로 바로 실행
+## 1) 다운로드 및 압축 해제
 
-GitHub Actions 아티팩트 `tunely-windows-x64.zip`을 다운로드 후 압축 해제합니다.
+GitHub Release 에셋에서 `tunely-windows-x64.zip`을 다운로드한 뒤 압축을 해제하세요.
 
-압축 해제 후 파일:
+포함 바이너리:
 
 - `tunely.exe`
 - `relay-server.exe`
 - `agent.exe`
 
-## 2) Relay 서버 실행 (PowerShell)
+## 2) Relay 실행 (PowerShell)
 
 ```powershell
 .\tunely.exe relay --listen 0.0.0.0:8080 --auth-token xxx,yyy
@@ -30,26 +30,18 @@ GitHub Actions 아티팩트 `tunely-windows-x64.zip`을 다운로드 후 압축 
   --local http://127.0.0.1:3000
 ```
 
-## 4) 외부 접근 확인
+## 4) 동작 확인
 
 ```powershell
 curl.exe -v http://<RELAY_PUBLIC_IP_OR_DOMAIN>:8080/t/demo/
-```
-
-바이너리 응답 확인:
-
-```powershell
 curl.exe -v http://<RELAY_PUBLIC_IP_OR_DOMAIN>:8080/t/demo/image.png --output out.png
 ```
 
-## 5) Windows 방화벽
+## 5) 방화벽
 
-relay를 외부에서 접근해야 하면 인바운드 `TCP 8080` 허용이 필요합니다.
+relay를 외부에 공개해야 하면 Windows 방화벽에서 인바운드 `TCP 8080`을 허용하세요.
 
-## 6) 자주 발생하는 문제
+## 관련 문서
 
-- `404 Not Found`: 경로를 `http://<relay>/t/<tunnel_id>/...` 형식으로 호출했는지 확인
-- `502 Bad Gateway`: 해당 `tunnel_id` agent 미연결 상태
-- `register rejected: invalid token`: relay `--auth-token` 목록에 agent `--token`이 없음
-- `register rejected: tunnel_id already in use`: 이미 같은 `tunnel_id`가 연결 중
-- 포트 충돌: 다른 포트 사용 또는 기존 프로세스 종료
+- 빌드/릴리즈: [build-and-release.md](build-and-release.md)
+- 트러블슈팅: [troubleshooting.md](troubleshooting.md)
