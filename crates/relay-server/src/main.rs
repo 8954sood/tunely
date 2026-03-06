@@ -1,10 +1,13 @@
 mod config;
 mod http_ingress;
+mod ingress;
 mod state;
 mod ws_session;
+mod ws_tunnel;
+mod ws_wire;
 
 use anyhow::Context;
-use axum::{routing::any, routing::get, Router};
+use axum::{Router, routing::any, routing::get};
 use clap::Parser;
 use tracing::info;
 
@@ -25,9 +28,9 @@ async fn main() -> anyhow::Result<()> {
 
     let app = Router::new()
         .route("/ws", get(ws_session::ws_handler))
-        .route("/t/:tunnel_id", any(http_ingress::ingress_root))
-        .route("/t/:tunnel_id/", any(http_ingress::ingress_root))
-        .route("/t/:tunnel_id/*path", any(http_ingress::ingress_path))
+        .route("/t/:tunnel_id", any(ingress::ingress_root))
+        .route("/t/:tunnel_id/", any(ingress::ingress_root))
+        .route("/t/:tunnel_id/*path", any(ingress::ingress_path))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(&config.listen)

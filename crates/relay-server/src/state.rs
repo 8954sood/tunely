@@ -3,18 +3,18 @@ use std::{
     sync::Arc,
 };
 
-use axum::{
-    body::Bytes,
-    extract::ws::Message,
-};
+use axum::{body::Bytes, extract::ws::Message};
 use dashmap::DashMap;
-use tokio::sync::{mpsc, RwLock};
+use protocol::WsOpcode;
+use tokio::sync::{RwLock, mpsc, oneshot};
 use uuid::Uuid;
 
 #[derive(Debug, Clone)]
 pub struct AgentHandle {
     pub connection_id: Uuid,
     pub sender: mpsc::UnboundedSender<Message>,
+    pub capabilities: HashSet<String>,
+    pub protocol_version: u8,
 }
 
 #[derive(Debug)]
@@ -31,11 +31,44 @@ pub enum RelayEvent {
     },
 }
 
+#[derive(Debug, Clone)]
+pub struct WsConnectAck {
+    pub ok: bool,
+    pub selected_subprotocol: Option<String>,
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub enum WsRelayEvent {
+    Frame {
+        opcode: WsOpcode,
+        payload: Bytes,
+    },
+    Close {
+        code: Option<u16>,
+        reason: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone)]
+struct WsStreamHandle {
+    tunnel_id: String,
+    sender: mpsc::UnboundedSender<WsRelayEvent>,
+}
+
+#[derive(Debug)]
+struct WsPending {
+    tunnel_id: String,
+    tx: oneshot::Sender<WsConnectAck>,
+}
+
 #[derive(Clone)]
 pub struct AppState {
     auth_tokens: Arc<HashSet<String>>,
     agents: Arc<RwLock<HashMap<String, AgentHandle>>>,
     inflight: Arc<DashMap<Uuid, mpsc::Sender<RelayEvent>>>,
+    ws_pending: Arc<DashMap<Uuid, WsPending>>,
+    ws_streams: Arc<DashMap<Uuid, WsStreamHandle>>,
     pub request_timeout_secs: u64,
 }
 
@@ -45,6 +78,8 @@ impl AppState {
             auth_tokens: Arc::new(auth_tokens),
             agents: Arc::new(RwLock::new(HashMap::new())),
             inflight: Arc::new(DashMap::new()),
+            ws_pending: Arc::new(DashMap::new()),
+            ws_streams: Arc::new(DashMap::new()),
             request_timeout_secs,
         }
     }
@@ -74,6 +109,8 @@ impl AppState {
             .is_some_and(|existing| existing.connection_id == connection_id);
         if should_remove {
             agents.remove(tunnel_id);
+            self.fail_ws_pending_for_tunnel(tunnel_id, "agent disconnected");
+            self.close_ws_for_tunnel(tunnel_id, Some(1011), "agent disconnected");
         }
     }
 
@@ -85,16 +122,33 @@ impl AppState {
         self.inflight.remove(&request_id);
     }
 
-    pub async fn notify_start(&self, request_id: Uuid, status: u16, headers: Vec<(String, String)>) {
-        if let Some(sender) = self.inflight.get(&request_id).map(|entry| entry.value().clone()) {
-            if sender.send(RelayEvent::Start { status, headers }).await.is_err() {
+    pub async fn notify_start(
+        &self,
+        request_id: Uuid,
+        status: u16,
+        headers: Vec<(String, String)>,
+    ) {
+        if let Some(sender) = self
+            .inflight
+            .get(&request_id)
+            .map(|entry| entry.value().clone())
+        {
+            if sender
+                .send(RelayEvent::Start { status, headers })
+                .await
+                .is_err()
+            {
                 self.inflight.remove(&request_id);
             }
         }
     }
 
     pub async fn notify_body(&self, request_id: Uuid, bytes: Bytes) {
-        if let Some(sender) = self.inflight.get(&request_id).map(|entry| entry.value().clone()) {
+        if let Some(sender) = self
+            .inflight
+            .get(&request_id)
+            .map(|entry| entry.value().clone())
+        {
             if sender.send(RelayEvent::Body(bytes)).await.is_err() {
                 self.inflight.remove(&request_id);
             }
@@ -110,6 +164,106 @@ impl AppState {
     pub async fn notify_error(&self, request_id: Uuid, code: String, message: String) {
         if let Some((_, sender)) = self.inflight.remove(&request_id) {
             let _ = sender.send(RelayEvent::Error { code, message }).await;
+        }
+    }
+
+    pub fn add_ws_pending(
+        &self,
+        stream_id: Uuid,
+        tunnel_id: String,
+        tx: oneshot::Sender<WsConnectAck>,
+    ) {
+        self.ws_pending
+            .insert(stream_id, WsPending { tunnel_id, tx });
+    }
+
+    pub fn remove_ws_pending(&self, stream_id: Uuid) {
+        self.ws_pending.remove(&stream_id);
+    }
+
+    pub fn notify_ws_connect_ack(
+        &self,
+        stream_id: Uuid,
+        ok: bool,
+        selected_subprotocol: Option<String>,
+        reason: Option<String>,
+    ) {
+        if let Some((_, pending)) = self.ws_pending.remove(&stream_id) {
+            let _ = pending.tx.send(WsConnectAck {
+                ok,
+                selected_subprotocol,
+                reason,
+            });
+        }
+    }
+
+    pub fn add_ws_stream(
+        &self,
+        stream_id: Uuid,
+        tunnel_id: String,
+        sender: mpsc::UnboundedSender<WsRelayEvent>,
+    ) {
+        self.ws_streams
+            .insert(stream_id, WsStreamHandle { tunnel_id, sender });
+    }
+
+    pub fn remove_ws_stream(&self, stream_id: Uuid) {
+        self.ws_streams.remove(&stream_id);
+    }
+
+    pub fn notify_ws_frame(&self, stream_id: Uuid, opcode: WsOpcode, payload: Bytes) {
+        if let Some(sender) = self
+            .ws_streams
+            .get(&stream_id)
+            .map(|entry| entry.value().sender.clone())
+        {
+            if sender
+                .send(WsRelayEvent::Frame { opcode, payload })
+                .is_err()
+            {
+                self.ws_streams.remove(&stream_id);
+            }
+        }
+    }
+
+    pub fn notify_ws_close(&self, stream_id: Uuid, code: Option<u16>, reason: Option<String>) {
+        if let Some((_, handle)) = self.ws_streams.remove(&stream_id) {
+            let _ = handle.sender.send(WsRelayEvent::Close { code, reason });
+        }
+    }
+
+    fn fail_ws_pending_for_tunnel(&self, tunnel_id: &str, reason: &str) {
+        let ids: Vec<Uuid> = self
+            .ws_pending
+            .iter()
+            .filter(|entry| entry.value().tunnel_id == tunnel_id)
+            .map(|entry| *entry.key())
+            .collect();
+        for id in ids {
+            if let Some((_, pending)) = self.ws_pending.remove(&id) {
+                let _ = pending.tx.send(WsConnectAck {
+                    ok: false,
+                    selected_subprotocol: None,
+                    reason: Some(reason.to_string()),
+                });
+            }
+        }
+    }
+
+    fn close_ws_for_tunnel(&self, tunnel_id: &str, code: Option<u16>, reason: &str) {
+        let ids: Vec<Uuid> = self
+            .ws_streams
+            .iter()
+            .filter(|entry| entry.value().tunnel_id == tunnel_id)
+            .map(|entry| *entry.key())
+            .collect();
+        for id in ids {
+            if let Some((_, handle)) = self.ws_streams.remove(&id) {
+                let _ = handle.sender.send(WsRelayEvent::Close {
+                    code,
+                    reason: Some(reason.to_string()),
+                });
+            }
         }
     }
 }

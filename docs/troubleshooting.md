@@ -106,12 +106,22 @@ tunely agent --relay ws://<relay>/ws --tunnel-id <id> --token <token> --local ht
 
 확인:
 
-- Caddy가 `/ws*`를 relay로 프록시하는지
-- agent가 `wss://<domain>/ws`로 접속하는지
+- `relay.example.com` 블록에서 `/ws*`를 relay로 프록시하는지
+- agent가 `wss://relay.example.com/ws`로 접속하는지
+- agent가 실수로 `wss://<domain>/t/<id>/ws`로 연결하지 않았는지
 
 ### Caddy 경유 시 클라이언트 404/502
 
 확인:
 
-- Caddy가 `/t/*`를 relay로 프록시하는지
+- subdomain rewrite가 `/t/<tunnel_id>{uri}` 형태로 설정되어 있는지
+- 예: `wss://demo.example.com/ws` -> relay 내부 `/t/demo/ws`
 - DNS가 Caddy 서버를 가리키는지
+
+### `WebSocket connection to 'wss://.../t/<id>/...' failed`
+
+확인:
+
+- 해당 `tunnel_id` agent가 연결되어 있는지 (`agent registered` 로그)
+- local 서버의 WS endpoint 경로가 실제로 존재하는지
+- Caddy matcher 순서에서 `relay.example.com /ws*`와 `*.example.com rewrite`가 충돌하지 않는지

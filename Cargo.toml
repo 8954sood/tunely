@@ -4,6 +4,8 @@ members = [
   "crates/protocol",
   "crates/relay-server",
   "crates/agent",
+  "examples/echo-server",
+  "examples/test-client",
 ]
 resolver = "2"
 

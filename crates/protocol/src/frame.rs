@@ -1,7 +1,7 @@
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::PROTOCOL_VERSION;
+use crate::{PROTOCOL_VERSION, is_supported_protocol_version};
 
 const HEADER_LEN: usize = 1 + 1 + 16 + 4 + 1;
 
@@ -10,6 +10,8 @@ const HEADER_LEN: usize = 1 + 1 + 16 + 4 + 1;
 pub enum StreamKind {
     RequestBody = 0,
     ResponseBody = 1,
+    WsClientFrame = 2,
+    WsLocalFrame = 3,
 }
 
 impl TryFrom<u8> for StreamKind {
@@ -19,7 +21,34 @@ impl TryFrom<u8> for StreamKind {
         match value {
             0 => Ok(Self::RequestBody),
             1 => Ok(Self::ResponseBody),
+            2 => Ok(Self::WsClientFrame),
+            3 => Ok(Self::WsLocalFrame),
             _ => Err(ChunkDecodeError::InvalidStreamKind(value)),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum WsOpcode {
+    Text = 0,
+    Binary = 1,
+    Ping = 2,
+    Pong = 3,
+    Close = 4,
+}
+
+impl TryFrom<u8> for WsOpcode {
+    type Error = ChunkDecodeError;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(Self::Text),
+            1 => Ok(Self::Binary),
+            2 => Ok(Self::Ping),
+            3 => Ok(Self::Pong),
+            4 => Ok(Self::Close),
+            _ => Err(ChunkDecodeError::InvalidWsOpcode(value)),
         }
     }
 }
@@ -40,11 +69,23 @@ pub enum ChunkDecodeError {
     UnsupportedVersion(u8),
     #[error("invalid stream kind: {0}")]
     InvalidStreamKind(u8),
+    #[error("missing websocket opcode")]
+    MissingWsOpcode,
+    #[error("invalid websocket opcode: {0}")]
+    InvalidWsOpcode(u8),
 }
 
 pub fn encode_chunk_frame(header: ChunkHeader, payload: &[u8]) -> Vec<u8> {
+    encode_chunk_frame_with_version(PROTOCOL_VERSION, header, payload)
+}
+
+pub fn encode_chunk_frame_with_version(
+    version: u8,
+    header: ChunkHeader,
+    payload: &[u8],
+) -> Vec<u8> {
     let mut out = Vec::with_capacity(HEADER_LEN + payload.len());
-    out.push(PROTOCOL_VERSION);
+    out.push(version);
     out.push(header.kind as u8);
     out.extend_from_slice(header.request_id.as_bytes());
     out.extend_from_slice(&header.seq.to_be_bytes());
@@ -59,7 +100,7 @@ pub fn decode_chunk_header(frame: &[u8]) -> Result<(ChunkHeader, &[u8]), ChunkDe
     }
 
     let version = frame[0];
-    if version != PROTOCOL_VERSION {
+    if !is_supported_protocol_version(version) {
         return Err(ChunkDecodeError::UnsupportedVersion(version));
     }
 
@@ -85,6 +126,21 @@ pub fn decode_chunk_header(frame: &[u8]) -> Result<(ChunkHeader, &[u8]), ChunkDe
         },
         payload,
     ))
+}
+
+pub fn encode_ws_payload(opcode: WsOpcode, payload: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(1 + payload.len());
+    out.push(opcode as u8);
+    out.extend_from_slice(payload);
+    out
+}
+
+pub fn decode_ws_payload(payload: &[u8]) -> Result<(WsOpcode, &[u8]), ChunkDecodeError> {
+    let Some((&opcode, rest)) = payload.split_first() else {
+        return Err(ChunkDecodeError::MissingWsOpcode);
+    };
+    let opcode = WsOpcode::try_from(opcode)?;
+    Ok((opcode, rest))
 }
 
 #[cfg(test)]
@@ -116,5 +172,13 @@ mod tests {
     fn rejects_short_frame() {
         let err = decode_chunk_header(&[1, 2, 3]).expect_err("must fail");
         assert!(matches!(err, ChunkDecodeError::FrameTooShort));
+    }
+
+    #[test]
+    fn ws_payload_round_trip() {
+        let encoded = encode_ws_payload(WsOpcode::Binary, b"abc");
+        let (op, payload) = decode_ws_payload(&encoded).expect("decode");
+        assert_eq!(op, WsOpcode::Binary);
+        assert_eq!(payload, b"abc");
     }
 }

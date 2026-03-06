@@ -50,8 +50,7 @@ impl Config {
                 resolved.listen = listen;
             }
             if let Some(tokens) = file_cfg.auth_tokens {
-                resolved.auth_tokens =
-                    normalize_token_list(tokens).map_err(anyhow::Error::msg)?;
+                resolved.auth_tokens = normalize_token_list(tokens).map_err(anyhow::Error::msg)?;
             }
             if let Some(timeout) = file_cfg.request_timeout_secs {
                 resolved.request_timeout_secs = timeout;
@@ -124,7 +123,7 @@ fn parse_auth_tokens(raw: &str) -> Result<HashSet<String>, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_auth_tokens, validate_resolved, Config, ResolvedConfig};
+    use super::{Config, ResolvedConfig, parse_auth_tokens, validate_resolved};
     use std::collections::HashSet;
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};

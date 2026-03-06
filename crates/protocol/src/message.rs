@@ -7,10 +7,18 @@ pub enum ControlMessage {
     RegisterAgent {
         tunnel_id: String,
         token: String,
+        #[serde(default)]
+        protocol_version: Option<u8>,
+        #[serde(default)]
+        capabilities: Vec<String>,
     },
     RegisterAck {
         ok: bool,
         reason: Option<String>,
+        #[serde(default)]
+        protocol_version: Option<u8>,
+        #[serde(default)]
+        capabilities: Vec<String>,
     },
     HttpRequestStart {
         request_id: Uuid,
@@ -28,6 +36,23 @@ pub enum ControlMessage {
     },
     HttpResponseEnd {
         request_id: Uuid,
+    },
+    WsConnect {
+        stream_id: Uuid,
+        path_and_query: String,
+        headers: Vec<(String, String)>,
+        subprotocols: Vec<String>,
+    },
+    WsConnectAck {
+        stream_id: Uuid,
+        ok: bool,
+        selected_subprotocol: Option<String>,
+        reason: Option<String>,
+    },
+    WsClose {
+        stream_id: Uuid,
+        code: Option<u16>,
+        reason: Option<String>,
     },
     Error {
         request_id: Option<Uuid>,

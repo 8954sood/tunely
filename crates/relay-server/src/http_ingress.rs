@@ -1,24 +1,24 @@
-use std::{
-    collections::VecDeque,
-    time::Duration,
-};
+use std::{collections::VecDeque, time::Duration};
 
 use async_stream::stream;
 use axum::{
     body::{Body, Bytes},
     extract::{OriginalUri, Path, State},
-    http::{header::HeaderName, HeaderMap, HeaderValue, Request, Response, StatusCode},
+    http::{HeaderMap, HeaderValue, Request, Response, StatusCode, header::HeaderName},
 };
 use futures_util::StreamExt;
-use protocol::{encode_chunk_frame, ChunkHeader, ControlMessage, StreamKind};
+use protocol::{
+    ChunkHeader, ControlMessage, StreamKind, encode_chunk_frame_with_version, is_hop_header,
+};
 use tokio::{
     sync::mpsc,
-    time::{timeout, Instant},
+    time::{Instant, timeout},
 };
 use tracing::{error, warn};
 use uuid::Uuid;
 
 use crate::state::{AppState, RelayEvent};
+use crate::ws_wire::send_control;
 
 pub async fn ingress_root(
     State(state): State<AppState>,
@@ -26,8 +26,14 @@ pub async fn ingress_root(
     OriginalUri(uri): OriginalUri,
     request: Request<Body>,
 ) -> Response<Body> {
-    handle_ingress(state, tunnel_id, String::new(), uri.path_and_query().map(|pq| pq.as_str()), request)
-        .await
+    handle_ingress(
+        state,
+        tunnel_id,
+        String::new(),
+        uri.path_and_query().map(|pq| pq.as_str()),
+        request,
+    )
+    .await
 }
 
 pub async fn ingress_path(
@@ -71,21 +77,34 @@ async fn handle_ingress(
     };
 
     if send_control(&agent.sender, &start).is_err() {
-        return simple_response(StatusCode::BAD_GATEWAY, "failed to deliver request start to agent");
+        return simple_response(
+            StatusCode::BAD_GATEWAY,
+            "failed to deliver request start to agent",
+        );
     }
 
     let (tx, mut rx) = mpsc::channel(128);
     state.add_inflight(request_id, tx);
 
-    if let Err(e) = stream_request_body(&agent.sender, request_id, body).await {
+    if let Err(e) =
+        stream_request_body(&agent.sender, request_id, body, agent.protocol_version).await
+    {
         state.remove_inflight(request_id);
         warn!(error = %e, %request_id, "request body relay failed");
         return simple_response(StatusCode::BAD_GATEWAY, "failed to stream request body");
     }
 
-    if send_control(&agent.sender, &ControlMessage::HttpRequestEnd { request_id }).is_err() {
+    if send_control(
+        &agent.sender,
+        &ControlMessage::HttpRequestEnd { request_id },
+    )
+    .is_err()
+    {
         state.remove_inflight(request_id);
-        return simple_response(StatusCode::BAD_GATEWAY, "failed to deliver request end to agent");
+        return simple_response(
+            StatusCode::BAD_GATEWAY,
+            "failed to deliver request end to agent",
+        );
     }
 
     let deadline = Duration::from_secs(state.request_timeout_secs);
@@ -116,7 +135,10 @@ async fn handle_ingress(
             RelayEvent::Body(chunk) => early_chunks.push_back(chunk),
             RelayEvent::End => {
                 state.remove_inflight(request_id);
-                return simple_response(StatusCode::BAD_GATEWAY, "agent response ended before start");
+                return simple_response(
+                    StatusCode::BAD_GATEWAY,
+                    "agent response ended before start",
+                );
             }
             RelayEvent::Error { code, message } => {
                 warn!(%request_id, %code, %message, "agent returned request error");
@@ -126,9 +148,8 @@ async fn handle_ingress(
         }
     };
 
-    let mut builder = Response::builder().status(
-        StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY),
-    );
+    let mut builder =
+        Response::builder().status(StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY));
 
     if let Some(headers_map) = builder.headers_mut() {
         apply_forwarded_headers(headers_map, &response_headers);
@@ -163,6 +184,7 @@ async fn stream_request_body(
     sender: &tokio::sync::mpsc::UnboundedSender<axum::extract::ws::Message>,
     request_id: Uuid,
     body: Body,
+    protocol_version: u8,
 ) -> anyhow::Result<()> {
     let mut seq = 0_u32;
     let mut stream = body.into_data_stream();
@@ -173,7 +195,8 @@ async fn stream_request_body(
             continue;
         }
 
-        let frame = encode_chunk_frame(
+        let frame = encode_chunk_frame_with_version(
+            protocol_version,
             ChunkHeader {
                 kind: StreamKind::RequestBody,
                 request_id,
@@ -190,16 +213,6 @@ async fn stream_request_body(
     }
 
     Ok(())
-}
-
-fn send_control(
-    sender: &tokio::sync::mpsc::UnboundedSender<axum::extract::ws::Message>,
-    msg: &ControlMessage,
-) -> anyhow::Result<()> {
-    let payload = serde_json::to_string(msg)?;
-    sender
-        .send(axum::extract::ws::Message::Text(payload))
-        .map_err(|_| anyhow::anyhow!("agent websocket channel closed"))
 }
 
 fn flatten_headers(headers: &HeaderMap) -> Vec<(String, String)> {
@@ -230,21 +243,11 @@ fn apply_forwarded_headers(headers: &mut HeaderMap, forwarded: &[(String, String
     }
 }
 
-fn is_hop_header(name: &str) -> bool {
-    matches!(
-        name.to_ascii_lowercase().as_str(),
-        "connection"
-            | "keep-alive"
-            | "proxy-authenticate"
-            | "proxy-authorization"
-            | "te"
-            | "trailers"
-            | "transfer-encoding"
-            | "upgrade"
-    )
-}
-
-fn extract_target_path(path_and_query: Option<&str>, tunnel_id: &str, tail_path: &str) -> String {
+pub(crate) fn extract_target_path(
+    path_and_query: Option<&str>,
+    tunnel_id: &str,
+    tail_path: &str,
+) -> String {
     if let Some(pq) = path_and_query {
         let base = format!("/t/{tunnel_id}");
         let trimmed = pq.strip_prefix(&base).unwrap_or(pq);

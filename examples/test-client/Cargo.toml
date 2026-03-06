@@ -1,0 +1,11 @@
+[package]
+name = "test-client"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+reqwest = "0.12"
+tokio = { version = "1", features = ["full"] }
+tokio-tungstenite = { version = "0.26", features = ["native-tls"] }
+futures-util = "0.3"

@@ -5,6 +5,7 @@ Tunely는 Rust로 구현한 경량 reverse tunnel MVP입니다.
 - Agent가 relay에 outbound WebSocket 연결을 맺고 유지
 - Relay가 외부 HTTP 요청을 `tunnel_id` 기준으로 agent에 전달
 - Agent가 로컬 서버(`localhost`)로 프록시 후 응답 반환
+- WebSocket 요청도 `/t/<tunnel_id>/...` 경로로 터널링 지원
 - 바이너리 바디(이미지/파일) 전달 지원
 
 ## 빠른 시작
@@ -33,6 +34,7 @@ request_timeout_secs: 60
 
 ## 문서
 
+- 로컬 개발/실행: [docs/local-dev.md](docs/local-dev.md)
 - Ubuntu 설치/실행: [docs/ubuntu.md](docs/ubuntu.md)
 - Windows 실행: [docs/windows.md](docs/windows.md)
 - Caddy 설정: [docs/caddy.md](docs/caddy.md)
@@ -65,6 +67,7 @@ cargo test --workspace
 ## MVP 범위
 
 - HTTP reverse proxy tunnel
+- WebSocket passthrough tunnel
 - 단일 relay + 복수 agent
 - `tunnel_id` routing
 - shared secret token 인증
