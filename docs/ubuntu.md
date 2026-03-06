@@ -83,7 +83,7 @@ tunely agent --relay ws://<RELAY_PUBLIC_IP_OR_DOMAIN>:8080/ws --tunnel-id demo -
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/8954sood/tunely/main/scripts/install-relay.sh | \
-  sudo bash -s -- --version v0.2.0
+  sudo bash -s -- --version v0.3.0
 ```
 
 ```bash
@@ -93,7 +93,7 @@ curl -fsSL https://raw.githubusercontent.com/8954sood/tunely/main/scripts/instal
     --tunnel-id demo \
     --token xxx \
     --local http://127.0.0.1:3000 \
-    --version v0.2.0
+    --version v0.3.0
 ```
 
 ## 4) 상태 확인 / 로그
