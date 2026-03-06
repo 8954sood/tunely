@@ -15,6 +15,8 @@ tunely help
 tunely relay --config /etc/tunely/relay.yaml
 tunely agent --relay ws://127.0.0.1:8080/ws --tunnel-id demo --token xxx --local http://127.0.0.1:3000
 curl -v http://127.0.0.1:8080/t/demo/
+curl -s http://127.0.0.1:8080/healthz
+curl -s http://127.0.0.1:8080/readyz
 ```
 
 Relay 설정 파일:
