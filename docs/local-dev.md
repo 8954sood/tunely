@@ -123,6 +123,13 @@ cargo run -p echo-server
 cargo run -p relay-server -- --listen 0.0.0.0:8080 --auth-token "test-token"
 ```
 
+헬스 체크:
+
+```bash
+curl -s http://127.0.0.1:8080/healthz
+curl -s http://127.0.0.1:8080/readyz
+```
+
 **터미널 3 - Agent:**
 
 ```bash

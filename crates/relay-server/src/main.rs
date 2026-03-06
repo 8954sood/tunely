@@ -1,4 +1,5 @@
 mod config;
+mod health;
 mod http_ingress;
 mod ingress;
 mod state;
@@ -27,6 +28,8 @@ async fn main() -> anyhow::Result<()> {
     let state = AppState::new(config.auth_tokens.clone(), config.request_timeout_secs);
 
     let app = Router::new()
+        .route("/healthz", get(health::healthz))
+        .route("/readyz", get(health::readyz))
         .route("/ws", get(ws_session::ws_handler))
         .route("/t/:tunnel_id", any(ingress::ingress_root))
         .route("/t/:tunnel_id/", any(ingress::ingress_root))
