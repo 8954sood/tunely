@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: "\U0001F4AC 질문/지원 문의"
+    url: https://github.com/8954sood/tunely/discussions
+    about: 버그 제보/기능 요청이 아닌 일반 질문은 Discussions를 이용해 주세요.
