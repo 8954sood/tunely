@@ -1,13 +1,12 @@
 # Caddy 설정 가이드 (Relay 앞단)
 
-`relay-server` 앞에 Caddy를 두면 TLS(HTTPS/WSS)와 도메인 처리를 Caddy가 맡고,
-relay는 내부 포트(`127.0.0.1:8080`)에서만 동작하게 운영할 수 있습니다.
+`relay-server` 앞에 Caddy를 두면 TLS(HTTPS/WSS)와 도메인 처리를 Caddy가 담당하고,
+relay는 내부 포트(`127.0.0.1:8080`)만 열어 운영할 수 있습니다.
 
-권장 흐름:
+핵심 분리:
 
-- 클라이언트 -> `https://tunnel.example.com` (Caddy)
-- Caddy -> `http://127.0.0.1:8080` (`relay-server`)
-- 에이전트 -> `wss://tunnel.example.com/ws`
+- 에이전트 제어 채널: `wss://relay.example.com/ws`
+- 외부 HTTP/WS 터널 트래픽: `https://<tunnel>.example.com/...`
 
 ## 1) Relay를 내부 포트로 실행
 
@@ -26,30 +25,33 @@ sudo apt update
 sudo apt install -y caddy
 ```
 
-## 3) Caddyfile 작성
+## 3) Caddyfile 작성 (서브도메인 라우팅)
 
 `/etc/caddy/Caddyfile`
 
 ```caddy
-# HTTP -> HTTPS redirect는 Caddy 기본 동작
-# 도메인이 이 서버를 가리키고 있어야 자동 TLS 발급 가능
+# relay.example.com: agent 제어 채널(/ws)
+relay.example.com {
+  encode zstd gzip
+  reverse_proxy /ws* 127.0.0.1:8080
+}
 
-tunnel.example.com {
+# *.example.com: 외부 사용자 HTTP/WS 트래픽
+*.example.com {
   encode zstd gzip
 
-  # WebSocket endpoint (agent 연결)
-  reverse_proxy /ws* 127.0.0.1:8080
+  # subdomain -> tunnel_id 변환
+  @sub host_regexp tid ^([a-z0-9-]+)\.example\.com$
+  rewrite @sub /t/{re.tid.1}{uri}
 
-  # Public tunnel endpoint (client 요청)
-  reverse_proxy /t/* 127.0.0.1:8080
-
-  # 선택: access log
-  log {
-    output file /var/log/caddy/tunnel-access.log
-    format console
-  }
+  reverse_proxy 127.0.0.1:8080
 }
 ```
+
+동작 예시:
+
+- `https://demo.example.com/api` -> relay `/t/demo/api`
+- `wss://demo.example.com/ws` -> relay `/t/demo/ws`
 
 적용:
 
@@ -58,31 +60,35 @@ sudo caddy validate --config /etc/caddy/Caddyfile
 sudo systemctl reload caddy
 ```
 
-## 4) Agent 연결 주소 변경
-
-Caddy를 쓰면 agent는 relay에 직접 `ws://127.0.0.1:8080/ws`로 붙지 않고,
-도메인 기반 `wss://.../ws`로 연결합니다.
+## 4) Agent 연결 주소
 
 ```bash
 tunely agent \
-  --relay wss://tunnel.example.com/ws \
+  --relay wss://relay.example.com/ws \
   --tunnel-id demo \
   --token xxx \
   --local http://127.0.0.1:3000
 ```
 
-외부 클라이언트 접근:
+## 5) 외부 접근 확인
+
+HTTP:
 
 ```bash
-curl -v https://tunnel.example.com/t/demo/
+curl -v https://demo.example.com/
 ```
 
-## 5) 방화벽 권장
+WebSocket(예: echo endpoint `/ws`):
+
+```bash
+# 예시 도구가 있다면 wscat/websocat 등으로 접속
+wscat -c wss://demo.example.com/ws
+```
+
+## 6) 방화벽 권장
 
 - 외부 오픈: `80/tcp`, `443/tcp`
 - relay 내부포트 `8080`은 외부 미오픈 권장
-
-예시:
 
 ```bash
 sudo ufw allow 80/tcp
@@ -90,7 +96,7 @@ sudo ufw allow 443/tcp
 sudo ufw deny 8080/tcp
 ```
 
-## 6) 관련 문서
+## 7) 관련 문서
 
 - 트러블슈팅: [troubleshooting.md](troubleshooting.md)
 - Ubuntu 설치/실행: [ubuntu.md](ubuntu.md)

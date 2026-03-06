@@ -2,19 +2,19 @@ use std::time::Duration;
 
 use axum::{
     extract::{
-        ws::{Message, WebSocket},
         State, WebSocketUpgrade,
+        ws::{Message, WebSocket},
     },
     response::IntoResponse,
 };
 use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
-use protocol::{decode_chunk_header, ControlMessage, StreamKind};
+use protocol::{ControlMessage, StreamKind, decode_chunk_header, decode_ws_payload};
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 use uuid::Uuid;
 
-use crate::state::{is_valid_tunnel_id, AgentHandle, AppState};
+use crate::state::{AgentHandle, AppState, is_valid_tunnel_id};
 
 pub async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
     ws.on_upgrade(move |socket| handle_socket(socket, state))
@@ -182,6 +182,21 @@ async fn handle_text_message(
         ControlMessage::HttpResponseEnd { request_id } => {
             state.notify_end(request_id).await;
         }
+        ControlMessage::WsConnectAck {
+            stream_id,
+            ok,
+            selected_subprotocol,
+            reason,
+        } => {
+            state.notify_ws_connect_ack(stream_id, ok, selected_subprotocol, reason);
+        }
+        ControlMessage::WsClose {
+            stream_id,
+            code,
+            reason,
+        } => {
+            state.notify_ws_close(stream_id, code, reason);
+        }
         ControlMessage::Error {
             request_id,
             code,
@@ -218,6 +233,13 @@ async fn handle_binary_message(state: &AppState, bytes: Bytes) -> anyhow::Result
         }
         StreamKind::RequestBody => {
             warn!(request_id = %header.request_id, "relay received unexpected request_body frame");
+        }
+        StreamKind::WsLocalFrame => {
+            let (opcode, data) = decode_ws_payload(payload)?;
+            state.notify_ws_frame(header.request_id, opcode, Bytes::copy_from_slice(data));
+        }
+        StreamKind::WsClientFrame => {
+            warn!(request_id = %header.request_id, "relay received unexpected ws_client_frame");
         }
     }
 

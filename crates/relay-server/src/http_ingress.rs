@@ -1,19 +1,16 @@
-use std::{
-    collections::VecDeque,
-    time::Duration,
-};
+use std::{collections::VecDeque, time::Duration};
 
 use async_stream::stream;
 use axum::{
     body::{Body, Bytes},
     extract::{OriginalUri, Path, State},
-    http::{header::HeaderName, HeaderMap, HeaderValue, Request, Response, StatusCode},
+    http::{HeaderMap, HeaderValue, Request, Response, StatusCode, header::HeaderName},
 };
 use futures_util::StreamExt;
-use protocol::{encode_chunk_frame, ChunkHeader, ControlMessage, StreamKind};
+use protocol::{ChunkHeader, ControlMessage, StreamKind, encode_chunk_frame};
 use tokio::{
     sync::mpsc,
-    time::{timeout, Instant},
+    time::{Instant, timeout},
 };
 use tracing::{error, warn};
 use uuid::Uuid;
@@ -26,8 +23,14 @@ pub async fn ingress_root(
     OriginalUri(uri): OriginalUri,
     request: Request<Body>,
 ) -> Response<Body> {
-    handle_ingress(state, tunnel_id, String::new(), uri.path_and_query().map(|pq| pq.as_str()), request)
-        .await
+    handle_ingress(
+        state,
+        tunnel_id,
+        String::new(),
+        uri.path_and_query().map(|pq| pq.as_str()),
+        request,
+    )
+    .await
 }
 
 pub async fn ingress_path(
@@ -71,7 +74,10 @@ async fn handle_ingress(
     };
 
     if send_control(&agent.sender, &start).is_err() {
-        return simple_response(StatusCode::BAD_GATEWAY, "failed to deliver request start to agent");
+        return simple_response(
+            StatusCode::BAD_GATEWAY,
+            "failed to deliver request start to agent",
+        );
     }
 
     let (tx, mut rx) = mpsc::channel(128);
@@ -83,9 +89,17 @@ async fn handle_ingress(
         return simple_response(StatusCode::BAD_GATEWAY, "failed to stream request body");
     }
 
-    if send_control(&agent.sender, &ControlMessage::HttpRequestEnd { request_id }).is_err() {
+    if send_control(
+        &agent.sender,
+        &ControlMessage::HttpRequestEnd { request_id },
+    )
+    .is_err()
+    {
         state.remove_inflight(request_id);
-        return simple_response(StatusCode::BAD_GATEWAY, "failed to deliver request end to agent");
+        return simple_response(
+            StatusCode::BAD_GATEWAY,
+            "failed to deliver request end to agent",
+        );
     }
 
     let deadline = Duration::from_secs(state.request_timeout_secs);
@@ -116,7 +130,10 @@ async fn handle_ingress(
             RelayEvent::Body(chunk) => early_chunks.push_back(chunk),
             RelayEvent::End => {
                 state.remove_inflight(request_id);
-                return simple_response(StatusCode::BAD_GATEWAY, "agent response ended before start");
+                return simple_response(
+                    StatusCode::BAD_GATEWAY,
+                    "agent response ended before start",
+                );
             }
             RelayEvent::Error { code, message } => {
                 warn!(%request_id, %code, %message, "agent returned request error");
@@ -126,9 +143,8 @@ async fn handle_ingress(
         }
     };
 
-    let mut builder = Response::builder().status(
-        StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY),
-    );
+    let mut builder =
+        Response::builder().status(StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY));
 
     if let Some(headers_map) = builder.headers_mut() {
         apply_forwarded_headers(headers_map, &response_headers);
@@ -244,7 +260,11 @@ fn is_hop_header(name: &str) -> bool {
     )
 }
 
-fn extract_target_path(path_and_query: Option<&str>, tunnel_id: &str, tail_path: &str) -> String {
+pub(crate) fn extract_target_path(
+    path_and_query: Option<&str>,
+    tunnel_id: &str,
+    tail_path: &str,
+) -> String {
     if let Some(pq) = path_and_query {
         let base = format!("/t/{tunnel_id}");
         let trimmed = pq.strip_prefix(&base).unwrap_or(pq);

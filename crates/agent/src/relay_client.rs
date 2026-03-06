@@ -1,19 +1,30 @@
 use std::{
+    collections::HashMap,
+    sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
 use protocol::{
-    decode_chunk_header, encode_chunk_frame, ChunkHeader, ControlMessage, StreamKind,
+    ChunkHeader, ControlMessage, StreamKind, WsOpcode, decode_chunk_header, decode_ws_payload,
+    encode_chunk_frame, encode_ws_payload,
 };
 use rand::Rng;
 use tokio::{
+    sync::Mutex,
     sync::mpsc,
     time::{interval, timeout},
 };
 use tokio_stream::wrappers::ReceiverStream;
-use tokio_tungstenite::{connect_async, tungstenite::Message};
+use tokio_tungstenite::{
+    connect_async,
+    tungstenite::{
+        Message,
+        client::IntoClientRequest,
+        http::{HeaderName, HeaderValue},
+    },
+};
 use tracing::{error, info, warn};
 use url::Url;
 use uuid::Uuid;
@@ -21,8 +32,26 @@ use uuid::Uuid;
 use crate::{
     config::Config,
     inflight::{BodyReceiver, Inflight},
-    local_proxy::{apply_forward_headers, compose_local_url, flatten_response_headers},
+    local_proxy::{
+        apply_forward_headers, compose_local_url, compose_local_ws_url, flatten_response_headers,
+        should_skip_ws_forward_header,
+    },
 };
+
+#[derive(Debug)]
+enum WsInboundEvent {
+    Frame {
+        opcode: WsOpcode,
+        payload: Bytes,
+    },
+    Close {
+        code: Option<u16>,
+        reason: Option<String>,
+    },
+}
+
+type WsInboundSender = mpsc::UnboundedSender<WsInboundEvent>;
+type WsSessionMap = Arc<Mutex<HashMap<Uuid, WsInboundSender>>>;
 
 pub async fn run(config: Config) -> anyhow::Result<()> {
     let mut attempt: u32 = 0;
@@ -81,6 +110,7 @@ async fn run_once(config: &Config) -> anyhow::Result<()> {
 
     let client = reqwest::Client::new();
     let mut inflight = Inflight::default();
+    let ws_sessions: WsSessionMap = Arc::new(Mutex::new(HashMap::new()));
 
     while let Some(msg) = ws_reader.next().await {
         let msg = msg?;
@@ -89,6 +119,7 @@ async fn run_once(config: &Config) -> anyhow::Result<()> {
                 handle_text_message(
                     text,
                     &mut inflight,
+                    ws_sessions.clone(),
                     &out_tx,
                     &client,
                     config.local.clone(),
@@ -96,7 +127,7 @@ async fn run_once(config: &Config) -> anyhow::Result<()> {
                 .await;
             }
             Message::Binary(bytes) => {
-                handle_binary_message(bytes.into(), &mut inflight).await;
+                handle_binary_message(bytes.into(), &mut inflight, ws_sessions.clone()).await;
             }
             Message::Ping(payload) => {
                 let _ = out_tx.send(Message::Pong(payload));
@@ -108,6 +139,7 @@ async fn run_once(config: &Config) -> anyhow::Result<()> {
     }
 
     inflight.clear();
+    ws_sessions.lock().await.clear();
     writer_task.abort();
     ping_task.abort();
     Ok(())
@@ -152,7 +184,10 @@ async fn wait_register_ack(
     match ack {
         ControlMessage::RegisterAck { ok: true, .. } => Ok(()),
         ControlMessage::RegisterAck { ok: false, reason } => {
-            anyhow::bail!("register rejected: {}", reason.unwrap_or_else(|| "unknown".to_string()))
+            anyhow::bail!(
+                "register rejected: {}",
+                reason.unwrap_or_else(|| "unknown".to_string())
+            )
         }
         _ => anyhow::bail!("unexpected register ack message"),
     }
@@ -161,6 +196,7 @@ async fn wait_register_ack(
 async fn handle_text_message(
     text: String,
     inflight: &mut Inflight,
+    ws_sessions: WsSessionMap,
     relay_tx: &mpsc::UnboundedSender<Message>,
     client: &reqwest::Client,
     local_base: String,
@@ -213,6 +249,35 @@ async fn handle_text_message(
         ControlMessage::HttpRequestEnd { request_id } => {
             inflight.remove(&request_id);
         }
+        ControlMessage::WsConnect {
+            stream_id,
+            path_and_query,
+            headers,
+            subprotocols,
+        } => {
+            let relay_tx = relay_tx.clone();
+            tokio::spawn(async move {
+                handle_ws_connect(
+                    stream_id,
+                    path_and_query,
+                    headers,
+                    subprotocols,
+                    local_base,
+                    relay_tx,
+                    ws_sessions,
+                )
+                .await;
+            });
+        }
+        ControlMessage::WsClose {
+            stream_id,
+            code,
+            reason,
+        } => {
+            if let Some(sender) = ws_sessions.lock().await.get(&stream_id).cloned() {
+                let _ = sender.send(WsInboundEvent::Close { code, reason });
+            }
+        }
         ControlMessage::Ping { ts_ms } => {
             let _ = send_control(relay_tx, &ControlMessage::Pong { ts_ms });
         }
@@ -228,7 +293,7 @@ async fn handle_text_message(
     }
 }
 
-async fn handle_binary_message(bytes: Bytes, inflight: &mut Inflight) {
+async fn handle_binary_message(bytes: Bytes, inflight: &mut Inflight, ws_sessions: WsSessionMap) {
     let (header, payload) = match decode_chunk_header(&bytes) {
         Ok(decoded) => decoded,
         Err(err) => {
@@ -237,24 +302,242 @@ async fn handle_binary_message(bytes: Bytes, inflight: &mut Inflight) {
         }
     };
 
-    if header.kind != StreamKind::RequestBody {
-        warn!(request_id = %header.request_id, "agent received non-request chunk");
-        return;
-    }
+    match header.kind {
+        StreamKind::RequestBody => {
+            if let Some(sender) = inflight.get(&header.request_id) {
+                if sender
+                    .send(Ok(Bytes::copy_from_slice(payload)))
+                    .await
+                    .is_err()
+                {
+                    inflight.remove(&header.request_id);
+                }
+            }
 
-    if let Some(sender) = inflight.get(&header.request_id) {
-        if sender
-            .send(Ok(Bytes::copy_from_slice(payload)))
-            .await
-            .is_err()
-        {
-            inflight.remove(&header.request_id);
+            if header.fin {
+                inflight.remove(&header.request_id);
+            }
+        }
+        StreamKind::WsClientFrame => {
+            let (opcode, data) = match decode_ws_payload(payload) {
+                Ok(decoded) => decoded,
+                Err(err) => {
+                    warn!(error = %err, stream_id = %header.request_id, "invalid ws frame payload from relay");
+                    return;
+                }
+            };
+
+            if let Some(sender) = ws_sessions.lock().await.get(&header.request_id).cloned() {
+                let _ = sender.send(WsInboundEvent::Frame {
+                    opcode,
+                    payload: Bytes::copy_from_slice(data),
+                });
+            }
+        }
+        StreamKind::ResponseBody => {
+            warn!(request_id = %header.request_id, "agent received unexpected response_body chunk");
+        }
+        StreamKind::WsLocalFrame => {
+            warn!(stream_id = %header.request_id, "agent received unexpected ws_local_frame");
+        }
+    }
+}
+
+async fn handle_ws_connect(
+    stream_id: Uuid,
+    path_and_query: String,
+    headers: Vec<(String, String)>,
+    subprotocols: Vec<String>,
+    local_base: String,
+    relay_tx: mpsc::UnboundedSender<Message>,
+    ws_sessions: WsSessionMap,
+) {
+    let result = run_one_ws_stream(
+        stream_id,
+        path_and_query,
+        headers,
+        subprotocols,
+        local_base,
+        relay_tx.clone(),
+        ws_sessions.clone(),
+    )
+    .await;
+
+    if let Err(err) = result {
+        let _ = send_control(
+            &relay_tx,
+            &ControlMessage::WsConnectAck {
+                stream_id,
+                ok: false,
+                selected_subprotocol: None,
+                reason: Some(err.to_string()),
+            },
+        );
+        let mut sessions = ws_sessions.lock().await;
+        sessions.remove(&stream_id);
+    }
+}
+
+async fn run_one_ws_stream(
+    stream_id: Uuid,
+    path_and_query: String,
+    headers: Vec<(String, String)>,
+    subprotocols: Vec<String>,
+    local_base: String,
+    relay_tx: mpsc::UnboundedSender<Message>,
+    ws_sessions: WsSessionMap,
+) -> anyhow::Result<()> {
+    let local_url = compose_local_ws_url(&local_base, &path_and_query)?;
+    let mut request = local_url.as_str().into_client_request()?;
+
+    {
+        let req_headers = request.headers_mut();
+        for (key, value) in headers {
+            if should_skip_ws_forward_header(&key) {
+                continue;
+            }
+            let Ok(name) = HeaderName::from_bytes(key.as_bytes()) else {
+                continue;
+            };
+            let Ok(value) = HeaderValue::from_str(&value) else {
+                continue;
+            };
+            req_headers.append(name, value);
+        }
+        if !subprotocols.is_empty() {
+            let joined = subprotocols.join(", ");
+            if let Ok(value) = HeaderValue::from_str(&joined) {
+                req_headers.insert("sec-websocket-protocol", value);
+            }
         }
     }
 
-    if header.fin {
-        inflight.remove(&header.request_id);
+    let (local_ws, response) = connect_async(request).await?;
+    let selected_subprotocol = response
+        .headers()
+        .get("sec-websocket-protocol")
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.to_string());
+
+    send_control(
+        &relay_tx,
+        &ControlMessage::WsConnectAck {
+            stream_id,
+            ok: true,
+            selected_subprotocol,
+            reason: None,
+        },
+    )?;
+
+    let (local_sink, mut local_stream) = local_ws.split();
+    let (in_tx, mut in_rx) = mpsc::unbounded_channel::<WsInboundEvent>();
+    ws_sessions.lock().await.insert(stream_id, in_tx);
+    let mut local_sink = local_sink;
+
+    loop {
+        tokio::select! {
+            inbound = in_rx.recv() => {
+                let Some(inbound) = inbound else {
+                    break;
+                };
+                match inbound {
+                    WsInboundEvent::Frame { opcode, payload } => {
+                        let out = match opcode {
+                            WsOpcode::Text => {
+                                match std::str::from_utf8(&payload) {
+                                    Ok(text) => Message::Text(text.to_string()),
+                                    Err(_) => Message::Close(None),
+                                }
+                            }
+                            WsOpcode::Binary => Message::Binary(payload.into()),
+                            WsOpcode::Ping => Message::Ping(payload.into()),
+                            WsOpcode::Pong => Message::Pong(payload.into()),
+                            WsOpcode::Close => Message::Close(None),
+                        };
+                        if local_sink.send(out).await.is_err() {
+                            break;
+                        }
+                    }
+                    WsInboundEvent::Close { code, reason } => {
+                        let frame = code.map(|code| tokio_tungstenite::tungstenite::protocol::CloseFrame {
+                            code: tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::from(code),
+                            reason: reason.unwrap_or_default().into(),
+                        });
+                        let _ = local_sink.send(Message::Close(frame)).await;
+                        break;
+                    }
+                }
+            }
+            from_local = local_stream.next() => {
+                let Some(from_local) = from_local else {
+                    let _ = send_control(&relay_tx, &ControlMessage::WsClose {
+                        stream_id,
+                        code: Some(1000),
+                        reason: Some("local ws ended".to_string()),
+                    });
+                    break;
+                };
+                match from_local {
+                    Ok(Message::Text(text)) => {
+                        send_ws_frame_to_relay(&relay_tx, stream_id, StreamKind::WsLocalFrame, WsOpcode::Text, text.as_bytes())?;
+                    }
+                    Ok(Message::Binary(bytes)) => {
+                        send_ws_frame_to_relay(&relay_tx, stream_id, StreamKind::WsLocalFrame, WsOpcode::Binary, &bytes)?;
+                    }
+                    Ok(Message::Ping(bytes)) => {
+                        send_ws_frame_to_relay(&relay_tx, stream_id, StreamKind::WsLocalFrame, WsOpcode::Ping, &bytes)?;
+                    }
+                    Ok(Message::Pong(bytes)) => {
+                        send_ws_frame_to_relay(&relay_tx, stream_id, StreamKind::WsLocalFrame, WsOpcode::Pong, &bytes)?;
+                    }
+                    Ok(Message::Close(close)) => {
+                        let (code, reason) = close
+                            .map(|c| (Some(u16::from(c.code)), Some(c.reason.to_string())))
+                            .unwrap_or((Some(1000), None));
+                        let _ = send_control(&relay_tx, &ControlMessage::WsClose {
+                            stream_id,
+                            code,
+                            reason,
+                        });
+                        break;
+                    }
+                    Ok(Message::Frame(_)) => {}
+                    Err(err) => {
+                        let _ = send_control(&relay_tx, &ControlMessage::WsClose {
+                            stream_id,
+                            code: Some(1011),
+                            reason: Some(format!("local ws read error: {err}")),
+                        });
+                        break;
+                    }
+                }
+            }
+        }
     }
+
+    ws_sessions.lock().await.remove(&stream_id);
+    Ok(())
+}
+
+fn send_ws_frame_to_relay(
+    relay_tx: &mpsc::UnboundedSender<Message>,
+    stream_id: Uuid,
+    kind: StreamKind,
+    opcode: WsOpcode,
+    payload: &[u8],
+) -> anyhow::Result<()> {
+    let frame = encode_chunk_frame(
+        ChunkHeader {
+            kind,
+            request_id: stream_id,
+            seq: 0,
+            fin: true,
+        },
+        &encode_ws_payload(opcode, payload),
+    );
+    relay_tx
+        .send(Message::Binary(frame))
+        .map_err(|_| anyhow::anyhow!("relay channel closed"))
 }
 
 async fn proxy_one_request(
@@ -271,7 +554,9 @@ async fn proxy_one_request(
     let method = reqwest::Method::from_bytes(method.as_bytes())?;
 
     let stream_body = ReceiverStream::new(body_rx);
-    let req = client.request(method, local_url).body(reqwest::Body::wrap_stream(stream_body));
+    let req = client
+        .request(method, local_url)
+        .body(reqwest::Body::wrap_stream(stream_body));
     let req = apply_forward_headers(req, &headers);
 
     let response = req.send().await?;
@@ -310,7 +595,10 @@ async fn proxy_one_request(
     Ok(())
 }
 
-fn send_control(relay_tx: &mpsc::UnboundedSender<Message>, msg: &ControlMessage) -> anyhow::Result<()> {
+fn send_control(
+    relay_tx: &mpsc::UnboundedSender<Message>,
+    msg: &ControlMessage,
+) -> anyhow::Result<()> {
     let payload = serde_json::to_string(msg)?;
     relay_tx
         .send(Message::Text(payload))
@@ -374,7 +662,8 @@ mod tests {
 
     #[test]
     fn derive_public_url_with_prefix_path() {
-        let url = derive_public_tunnel_url("wss://relay.example.com/proxy/ws", "demo").expect("url");
+        let url =
+            derive_public_tunnel_url("wss://relay.example.com/proxy/ws", "demo").expect("url");
         assert_eq!(url, "https://relay.example.com/proxy/t/demo/");
     }
 }

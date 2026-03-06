@@ -29,6 +29,23 @@ pub enum ControlMessage {
     HttpResponseEnd {
         request_id: Uuid,
     },
+    WsConnect {
+        stream_id: Uuid,
+        path_and_query: String,
+        headers: Vec<(String, String)>,
+        subprotocols: Vec<String>,
+    },
+    WsConnectAck {
+        stream_id: Uuid,
+        ok: bool,
+        selected_subprotocol: Option<String>,
+        reason: Option<String>,
+    },
+    WsClose {
+        stream_id: Uuid,
+        code: Option<u16>,
+        reason: Option<String>,
+    },
     Error {
         request_id: Option<Uuid>,
         code: String,

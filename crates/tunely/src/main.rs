@@ -2,7 +2,7 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
 
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
 use clap::{Parser, Subcommand};
 
 const DEFAULT_RELAY_CONFIG: &str = "/etc/tunely/relay.yaml";
@@ -85,8 +85,14 @@ fn print_main_help() -> anyhow::Result<()> {
     println!("Usage: tunely [COMMAND]");
     println!();
     println!("Commands:");
-    println!("  relay  Run relay-server ({})", install_state_label(Target::Relay));
-    println!("  agent  Run agent ({})", install_state_label(Target::Agent));
+    println!(
+        "  relay  Run relay-server ({})",
+        install_state_label(Target::Relay)
+    );
+    println!(
+        "  agent  Run agent ({})",
+        install_state_label(Target::Agent)
+    );
     println!("  help   Print this message or the help of the given subcommand(s)");
     println!();
     println!("Options:");
@@ -164,7 +170,9 @@ fn candidate_commands(target: Target) -> anyhow::Result<Vec<OsString>> {
         out.push(path_candidate(dir.join(target.bin_name())));
     }
 
-    out.push(path_candidate(PathBuf::from("/opt/tunely").join(target.bin_name())));
+    out.push(path_candidate(
+        PathBuf::from("/opt/tunely").join(target.bin_name()),
+    ));
     out.push(OsString::from(target.bin_name()));
 
     Ok(out)
@@ -237,9 +245,15 @@ mod tests {
 
     #[test]
     fn detect_config_arg() {
-        assert!(has_config_arg(&[OsString::from("--config"), OsString::from("x.yaml")]));
+        assert!(has_config_arg(&[
+            OsString::from("--config"),
+            OsString::from("x.yaml")
+        ]));
         assert!(has_config_arg(&[OsString::from("--config=/tmp/x.yaml")]));
-        assert!(!has_config_arg(&[OsString::from("--listen"), OsString::from("0.0.0.0:8080")]));
+        assert!(!has_config_arg(&[
+            OsString::from("--listen"),
+            OsString::from("0.0.0.0:8080")
+        ]));
     }
 
     #[test]
