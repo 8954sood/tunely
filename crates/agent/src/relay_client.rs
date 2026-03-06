@@ -7,8 +7,9 @@ use std::{
 use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
 use protocol::{
-    ChunkHeader, ControlMessage, StreamKind, WsOpcode, decode_chunk_header, decode_ws_payload,
-    encode_chunk_frame, encode_ws_payload,
+    CAP_WS_TUNNEL_V1, ChunkHeader, ControlMessage, LEGACY_PROTOCOL_VERSION, PROTOCOL_VERSION,
+    StreamKind, WsOpcode, decode_chunk_header, decode_ws_payload, encode_chunk_frame_with_version,
+    encode_ws_payload, is_supported_protocol_version,
 };
 use rand::Rng;
 use tokio::{
@@ -53,6 +54,12 @@ enum WsInboundEvent {
 type WsInboundSender = mpsc::UnboundedSender<WsInboundEvent>;
 type WsSessionMap = Arc<Mutex<HashMap<Uuid, WsInboundSender>>>;
 
+#[derive(Debug, Default)]
+struct RegisterAckInfo {
+    relay_protocol_version: u8,
+    relay_capabilities: Vec<String>,
+}
+
 pub async fn run(config: Config) -> anyhow::Result<()> {
     let mut attempt: u32 = 0;
 
@@ -79,7 +86,12 @@ async fn run_once(config: &Config) -> anyhow::Result<()> {
     let (mut ws_writer, mut ws_reader) = ws_stream.split();
 
     send_register(&mut ws_writer, config).await?;
-    wait_register_ack(&mut ws_reader).await?;
+    let register_ack = wait_register_ack(&mut ws_reader).await?;
+    let relay_frame_version = register_ack.relay_protocol_version;
+    let relay_supports_ws = register_ack
+        .relay_capabilities
+        .iter()
+        .any(|capability| capability == CAP_WS_TUNNEL_V1);
     if let Some(public_url) = derive_public_tunnel_url(&config.relay, &config.tunnel_id) {
         info!(tunnel_id = %config.tunnel_id, %public_url, "agent registered; client access URL");
     } else {
@@ -123,6 +135,8 @@ async fn run_once(config: &Config) -> anyhow::Result<()> {
                     &out_tx,
                     &client,
                     config.local.clone(),
+                    relay_supports_ws,
+                    relay_frame_version,
                 )
                 .await;
             }
@@ -157,6 +171,8 @@ async fn send_register(
     let register = ControlMessage::RegisterAgent {
         tunnel_id: config.tunnel_id.clone(),
         token: config.token.clone(),
+        protocol_version: Some(PROTOCOL_VERSION),
+        capabilities: vec![CAP_WS_TUNNEL_V1.to_string()],
     };
     ws_writer
         .send(Message::Text(serde_json::to_string(&register)?))
@@ -170,7 +186,7 @@ async fn wait_register_ack(
             tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
         >,
     >,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<RegisterAckInfo> {
     let maybe_msg = timeout(Duration::from_secs(10), ws_reader.next()).await?;
     let frame_result =
         maybe_msg.ok_or_else(|| anyhow::anyhow!("relay closed websocket before register ack"))?;
@@ -182,8 +198,26 @@ async fn wait_register_ack(
 
     let ack: ControlMessage = serde_json::from_str(&text)?;
     match ack {
-        ControlMessage::RegisterAck { ok: true, .. } => Ok(()),
-        ControlMessage::RegisterAck { ok: false, reason } => {
+        ControlMessage::RegisterAck {
+            ok: true,
+            protocol_version,
+            capabilities,
+            ..
+        } => {
+            let relay_protocol_version = protocol_version.unwrap_or(LEGACY_PROTOCOL_VERSION);
+            if !is_supported_protocol_version(relay_protocol_version) {
+                anyhow::bail!(
+                    "relay replied with unsupported protocol_version: {relay_protocol_version}"
+                );
+            }
+            Ok(RegisterAckInfo {
+                relay_protocol_version,
+                relay_capabilities: capabilities,
+            })
+        }
+        ControlMessage::RegisterAck {
+            ok: false, reason, ..
+        } => {
             anyhow::bail!(
                 "register rejected: {}",
                 reason.unwrap_or_else(|| "unknown".to_string())
@@ -200,6 +234,8 @@ async fn handle_text_message(
     relay_tx: &mpsc::UnboundedSender<Message>,
     client: &reqwest::Client,
     local_base: String,
+    relay_supports_ws: bool,
+    relay_frame_version: u8,
 ) {
     let parsed = match serde_json::from_str::<ControlMessage>(&text) {
         Ok(msg) => msg,
@@ -231,6 +267,7 @@ async fn handle_text_message(
                     &client,
                     local_base,
                     &relay_tx,
+                    relay_frame_version,
                 )
                 .await
                 {
@@ -255,6 +292,21 @@ async fn handle_text_message(
             headers,
             subprotocols,
         } => {
+            if !relay_supports_ws {
+                warn!(%stream_id, "relay did not advertise ws_tunnel_v1; rejecting ws connect");
+                let _ = send_control(
+                    relay_tx,
+                    &ControlMessage::WsConnectAck {
+                        stream_id,
+                        ok: false,
+                        selected_subprotocol: None,
+                        reason: Some(
+                            "relay does not support websocket tunnel capability".to_string(),
+                        ),
+                    },
+                );
+                return;
+            }
             let relay_tx = relay_tx.clone();
             tokio::spawn(async move {
                 handle_ws_connect(
@@ -265,6 +317,7 @@ async fn handle_text_message(
                     local_base,
                     relay_tx,
                     ws_sessions,
+                    relay_frame_version,
                 )
                 .await;
             });
@@ -351,6 +404,7 @@ async fn handle_ws_connect(
     local_base: String,
     relay_tx: mpsc::UnboundedSender<Message>,
     ws_sessions: WsSessionMap,
+    relay_frame_version: u8,
 ) {
     let result = run_one_ws_stream(
         stream_id,
@@ -360,6 +414,7 @@ async fn handle_ws_connect(
         local_base,
         relay_tx.clone(),
         ws_sessions.clone(),
+        relay_frame_version,
     )
     .await;
 
@@ -386,6 +441,7 @@ async fn run_one_ws_stream(
     local_base: String,
     relay_tx: mpsc::UnboundedSender<Message>,
     ws_sessions: WsSessionMap,
+    relay_frame_version: u8,
 ) -> anyhow::Result<()> {
     let local_url = compose_local_ws_url(&local_base, &path_and_query)?;
     let mut request = local_url.as_str().into_client_request()?;
@@ -479,16 +535,24 @@ async fn run_one_ws_stream(
                 };
                 match from_local {
                     Ok(Message::Text(text)) => {
-                        send_ws_frame_to_relay(&relay_tx, stream_id, StreamKind::WsLocalFrame, WsOpcode::Text, text.as_bytes())?;
+                        if send_ws_frame_to_relay(&relay_tx, relay_frame_version, stream_id, StreamKind::WsLocalFrame, WsOpcode::Text, text.as_bytes()).is_err() {
+                            break;
+                        }
                     }
                     Ok(Message::Binary(bytes)) => {
-                        send_ws_frame_to_relay(&relay_tx, stream_id, StreamKind::WsLocalFrame, WsOpcode::Binary, &bytes)?;
+                        if send_ws_frame_to_relay(&relay_tx, relay_frame_version, stream_id, StreamKind::WsLocalFrame, WsOpcode::Binary, &bytes).is_err() {
+                            break;
+                        }
                     }
                     Ok(Message::Ping(bytes)) => {
-                        send_ws_frame_to_relay(&relay_tx, stream_id, StreamKind::WsLocalFrame, WsOpcode::Ping, &bytes)?;
+                        if send_ws_frame_to_relay(&relay_tx, relay_frame_version, stream_id, StreamKind::WsLocalFrame, WsOpcode::Ping, &bytes).is_err() {
+                            break;
+                        }
                     }
                     Ok(Message::Pong(bytes)) => {
-                        send_ws_frame_to_relay(&relay_tx, stream_id, StreamKind::WsLocalFrame, WsOpcode::Pong, &bytes)?;
+                        if send_ws_frame_to_relay(&relay_tx, relay_frame_version, stream_id, StreamKind::WsLocalFrame, WsOpcode::Pong, &bytes).is_err() {
+                            break;
+                        }
                     }
                     Ok(Message::Close(close)) => {
                         let (code, reason) = close
@@ -515,18 +579,27 @@ async fn run_one_ws_stream(
         }
     }
 
-    ws_sessions.lock().await.remove(&stream_id);
+    drop(in_rx);
+    cleanup_ws_session(&ws_sessions, stream_id).await;
     Ok(())
+}
+
+async fn cleanup_ws_session(ws_sessions: &WsSessionMap, stream_id: Uuid) {
+    ws_sessions.lock().await.remove(&stream_id);
 }
 
 fn send_ws_frame_to_relay(
     relay_tx: &mpsc::UnboundedSender<Message>,
+    protocol_version: u8,
     stream_id: Uuid,
     kind: StreamKind,
     opcode: WsOpcode,
     payload: &[u8],
 ) -> anyhow::Result<()> {
-    let frame = encode_chunk_frame(
+    // Current MVP sends one websocket message per protocol chunk.
+    // `seq`/`fin` are reserved for future fragmentation support.
+    let frame = encode_chunk_frame_with_version(
+        protocol_version,
         ChunkHeader {
             kind,
             request_id: stream_id,
@@ -549,6 +622,7 @@ async fn proxy_one_request(
     client: &reqwest::Client,
     local_base: String,
     relay_tx: &mpsc::UnboundedSender<Message>,
+    relay_frame_version: u8,
 ) -> anyhow::Result<()> {
     let local_url = compose_local_url(&local_base, &path_and_query)?;
     let method = reqwest::Method::from_bytes(method.as_bytes())?;
@@ -576,7 +650,8 @@ async fn proxy_one_request(
             continue;
         }
 
-        let frame = encode_chunk_frame(
+        let frame = encode_chunk_frame_with_version(
+            relay_frame_version,
             ChunkHeader {
                 kind: StreamKind::ResponseBody,
                 request_id,

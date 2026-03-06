@@ -7,13 +7,15 @@ use axum::{
 };
 use futures_util::{SinkExt, StreamExt};
 use protocol::{
-    ChunkHeader, ControlMessage, StreamKind, WsOpcode, encode_chunk_frame, encode_ws_payload,
+    CAP_WS_TUNNEL_V1, ChunkHeader, ControlMessage, StreamKind, WsOpcode,
+    encode_chunk_frame_with_version, encode_ws_payload, is_hop_header,
 };
 use tokio::{sync::oneshot, time::timeout};
 use tracing::{debug, warn};
 use uuid::Uuid;
 
 use crate::state::{AppState, WsConnectAck, WsRelayEvent};
+use crate::ws_wire::send_control;
 
 const WS_CONNECT_TIMEOUT_SECS: u64 = 10;
 
@@ -27,6 +29,12 @@ pub async fn upgrade_client_ws(
     let Some(agent) = state.get_agent(&tunnel_id).await else {
         return simple_response(StatusCode::BAD_GATEWAY, "no connected agent for tunnel");
     };
+    if !agent.capabilities.contains(CAP_WS_TUNNEL_V1) {
+        return simple_response(
+            StatusCode::NOT_IMPLEMENTED,
+            "connected agent does not support websocket tunneling",
+        );
+    }
 
     let stream_id = Uuid::new_v4();
     let forwarded_headers = flatten_ws_headers(&headers);
@@ -56,7 +64,16 @@ pub async fn upgrade_client_ws(
     };
 
     ws.on_upgrade(move |socket| async move {
-        handle_client_socket(socket, state, tunnel_id, stream_id, ack_rx, agent.sender).await;
+        handle_client_socket(
+            socket,
+            state,
+            tunnel_id,
+            stream_id,
+            ack_rx,
+            agent.sender,
+            agent.protocol_version,
+        )
+        .await;
     })
 }
 
@@ -67,6 +84,7 @@ async fn handle_client_socket(
     stream_id: Uuid,
     ack_rx: oneshot::Receiver<WsConnectAck>,
     agent_sender: tokio::sync::mpsc::UnboundedSender<Message>,
+    agent_protocol_version: u8,
 ) {
     let (mut client_tx, mut client_rx) = socket.split();
     let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<WsRelayEvent>();
@@ -119,22 +137,22 @@ async fn handle_client_socket(
                 };
                 match client {
                     Ok(Message::Text(text)) => {
-                        if send_ws_frame(&agent_sender, stream_id, StreamKind::WsClientFrame, WsOpcode::Text, text.as_str().as_bytes()).is_err() {
+                        if send_ws_frame(&agent_sender, stream_id, agent_protocol_version, StreamKind::WsClientFrame, WsOpcode::Text, text.as_str().as_bytes()).is_err() {
                             break;
                         }
                     }
                     Ok(Message::Binary(bytes)) => {
-                        if send_ws_frame(&agent_sender, stream_id, StreamKind::WsClientFrame, WsOpcode::Binary, &bytes).is_err() {
+                        if send_ws_frame(&agent_sender, stream_id, agent_protocol_version, StreamKind::WsClientFrame, WsOpcode::Binary, &bytes).is_err() {
                             break;
                         }
                     }
                     Ok(Message::Ping(bytes)) => {
-                        if send_ws_frame(&agent_sender, stream_id, StreamKind::WsClientFrame, WsOpcode::Ping, &bytes).is_err() {
+                        if send_ws_frame(&agent_sender, stream_id, agent_protocol_version, StreamKind::WsClientFrame, WsOpcode::Ping, &bytes).is_err() {
                             break;
                         }
                     }
                     Ok(Message::Pong(bytes)) => {
-                        if send_ws_frame(&agent_sender, stream_id, StreamKind::WsClientFrame, WsOpcode::Pong, &bytes).is_err() {
+                        if send_ws_frame(&agent_sender, stream_id, agent_protocol_version, StreamKind::WsClientFrame, WsOpcode::Pong, &bytes).is_err() {
                             break;
                         }
                     }
@@ -209,11 +227,15 @@ async fn handle_client_socket(
 fn send_ws_frame(
     sender: &tokio::sync::mpsc::UnboundedSender<Message>,
     stream_id: Uuid,
+    protocol_version: u8,
     kind: StreamKind,
     opcode: WsOpcode,
     payload: &[u8],
 ) -> anyhow::Result<()> {
-    let frame = encode_chunk_frame(
+    // Current MVP sends one websocket message per protocol chunk.
+    // `seq`/`fin` are reserved for future fragmentation support.
+    let frame = encode_chunk_frame_with_version(
+        protocol_version,
         ChunkHeader {
             kind,
             request_id: stream_id,
@@ -224,16 +246,6 @@ fn send_ws_frame(
     );
     sender
         .send(Message::Binary(frame.into()))
-        .map_err(|_| anyhow::anyhow!("agent websocket channel closed"))
-}
-
-fn send_control(
-    sender: &tokio::sync::mpsc::UnboundedSender<Message>,
-    msg: &ControlMessage,
-) -> anyhow::Result<()> {
-    let payload = serde_json::to_string(msg)?;
-    sender
-        .send(Message::Text(payload.into()))
         .map_err(|_| anyhow::anyhow!("agent websocket channel closed"))
 }
 
@@ -263,20 +275,6 @@ fn parse_subprotocols(headers: &HeaderMap) -> Vec<String> {
         .map(|token| token.trim().to_string())
         .filter(|token| !token.is_empty())
         .collect()
-}
-
-fn is_hop_header(name: &str) -> bool {
-    matches!(
-        name.to_ascii_lowercase().as_str(),
-        "connection"
-            | "keep-alive"
-            | "proxy-authenticate"
-            | "proxy-authorization"
-            | "te"
-            | "trailers"
-            | "transfer-encoding"
-            | "upgrade"
-    )
 }
 
 fn simple_response(status: StatusCode, body: &str) -> Response<Body> {

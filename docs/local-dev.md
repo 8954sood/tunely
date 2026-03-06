@@ -5,7 +5,7 @@
 ## 사전 요구사항
 
 - Rust toolchain (`rustup` 권장)
-- 로컬에서 프록시할 서비스 (예: `http://127.0.0.1:3000`)
+- 로컬에서 프록시할 서비스 (예: `http://127.0.0.1:3000`) — 없으면 내장 echo-server 사용 가능
 
 ## 1) 빌드
 
@@ -83,17 +83,35 @@ cargo run -p tunely -- agent \
 | `--ping-interval-secs` | `20` | WebSocket ping 간격 |
 | `--max-backoff-secs` | `30` | 재연결 최대 백오프 |
 
-## 4) 동작 확인
+## 4) 동작 확인 (echo-server + test-client)
 
-터미널 3개를 열어 아래 순서로 실행합니다.
+`examples/` 에 테스트용 서버와 클라이언트가 포함되어 있습니다.
 
-**터미널 1 - Relay:**
+터미널 4개를 열어 아래 순서로 실행합니다.
+
+**터미널 1 - echo-server** (로컬 서비스 역할):
+
+```bash
+cargo run -p echo-server
+```
+
+기본 포트 `3000`에서 실행됩니다. 포트 변경: `cargo run -p echo-server -- 4000`
+
+엔드포인트:
+
+- `GET /` — hello 응답
+- `ANY /echo` — 요청 메서드 JSON 반환
+- `ANY /headers` — 수신된 헤더 JSON 반환
+- `ANY /body` — 요청 body echo
+- `GET /ws` — WebSocket echo (text/binary 그대로 반환)
+
+**터미널 2 - Relay:**
 
 ```bash
 cargo run -p relay-server -- --listen 0.0.0.0:8080 --auth-token "test-token"
 ```
 
-**터미널 2 - Agent:**
+**터미널 3 - Agent:**
 
 ```bash
 cargo run -p agent -- \
@@ -103,10 +121,53 @@ cargo run -p agent -- \
   --local http://127.0.0.1:3000
 ```
 
-**터미널 3 - 요청 테스트:**
+**터미널 4 - test-client** (HTTP + WebSocket 자동 테스트):
+
+```bash
+cargo run -p test-client
+```
+
+기본 대상: `http://127.0.0.1:8080/t/demo`. 변경: `cargo run -p test-client -- http://127.0.0.1:8080/t/demo`
+
+출력 예시:
+
+```
+=== tunely test client ===
+target: http://127.0.0.1:8080/t/demo
+
+--- HTTP tests ---
+
+[PASS] GET /                           -> 200 OK | hello from echo-server
+[PASS] GET /echo                       -> 200 OK | {"method":"GET"}
+[PASS] POST /echo                      -> 200 OK | {"method":"POST"}
+[PASS] PUT /echo                       -> 200 OK | {"method":"PUT"}
+[PASS] PATCH /echo                     -> 200 OK | {"method":"PATCH"}
+[PASS] DELETE /echo                    -> 200 OK | {"method":"DELETE"}
+[PASS] OPTIONS /echo                   -> 200 OK | {"method":"OPTIONS"}
+[PASS] HEAD /echo                      -> 200 OK
+[PASS] POST /body (with body)          -> 200 OK | body echoed
+[PASS] PUT /body (with body)           -> 200 OK | body echoed
+[PASS] PATCH /body (with body)         -> 200 OK | body echoed
+[PASS] GET /headers (x-test)           -> 200 OK | x-test forwarded
+
+--- WebSocket tests ---
+
+[PASS] WS connect                      -> ws://127.0.0.1:8080/t/demo/ws
+[PASS] WS text echo                    -> echo: hello tunely
+[PASS] WS binary echo                  -> 4 bytes
+[PASS] WS close                        -> sent
+
+=== result: (16/16) ===
+ALL TESTS PASSED
+```
+
+모두 `[PASS]`이면 HTTP/WebSocket 터널링이 정상 동작하는 것입니다.
+
+수동으로 확인하려면:
 
 ```bash
 curl -v http://127.0.0.1:8080/t/demo/
+curl -v http://127.0.0.1:8080/t/demo/headers -H "x-test: tunely"
 ```
 
 ## 5) 이미 설치된 환경에서 개발 버전 실행

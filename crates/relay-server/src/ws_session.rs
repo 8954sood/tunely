@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{collections::HashSet, time::Duration};
 
 use axum::{
     extract::{
@@ -9,12 +9,16 @@ use axum::{
 };
 use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
-use protocol::{ControlMessage, StreamKind, decode_chunk_header, decode_ws_payload};
+use protocol::{
+    CAP_WS_TUNNEL_V1, ControlMessage, LEGACY_PROTOCOL_VERSION, PROTOCOL_VERSION, StreamKind,
+    decode_chunk_header, decode_ws_payload, is_supported_protocol_version,
+};
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::state::{AgentHandle, AppState, is_valid_tunnel_id};
+use crate::ws_wire::send_control;
 
 pub async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
     ws.on_upgrade(move |socket| handle_socket(socket, state))
@@ -37,42 +41,71 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
         return;
     };
 
-    let (tunnel_id, token) = match register_msg {
-        ControlMessage::RegisterAgent { tunnel_id, token } => (tunnel_id, token),
+    let (tunnel_id, token, protocol_version, capabilities) = match register_msg {
+        ControlMessage::RegisterAgent {
+            tunnel_id,
+            token,
+            protocol_version,
+            capabilities,
+            ..
+        } => (tunnel_id, token, protocol_version, capabilities),
         _ => {
-            let _ = out_tx.send(Message::Text(
-                serde_json::to_string(&ControlMessage::RegisterAck {
+            let _ = send_control(
+                &out_tx,
+                &ControlMessage::RegisterAck {
                     ok: false,
                     reason: Some("first message must be register_agent".to_string()),
-                })
-                .unwrap_or_else(|_| "{}".to_string()),
-            ));
+                    protocol_version: Some(PROTOCOL_VERSION),
+                    capabilities: relay_capabilities(),
+                },
+            );
             writer_task.abort();
             return;
         }
     };
+    let peer_protocol_version = protocol_version.unwrap_or(LEGACY_PROTOCOL_VERSION);
+    if !is_supported_protocol_version(peer_protocol_version) {
+        let _ = send_control(
+            &out_tx,
+            &ControlMessage::RegisterAck {
+                ok: false,
+                reason: Some(format!(
+                    "unsupported protocol_version: {peer_protocol_version}"
+                )),
+                protocol_version: Some(PROTOCOL_VERSION),
+                capabilities: relay_capabilities(),
+            },
+        );
+        warn!(%tunnel_id, protocol_version = peer_protocol_version, "agent register rejected: unsupported protocol_version");
+        writer_task.abort();
+        return;
+    }
 
     if !is_valid_tunnel_id(&tunnel_id) {
-        let _ = out_tx.send(Message::Text(
-            serde_json::to_string(&ControlMessage::RegisterAck {
+        let _ = send_control(
+            &out_tx,
+            &ControlMessage::RegisterAck {
                 ok: false,
                 reason: Some("invalid tunnel_id format".to_string()),
-            })
-            .unwrap_or_else(|_| "{}".to_string()),
-        ));
+                protocol_version: Some(PROTOCOL_VERSION),
+                capabilities: relay_capabilities(),
+            },
+        );
         warn!(%tunnel_id, "agent register rejected: invalid tunnel_id format");
         writer_task.abort();
         return;
     }
 
     if !state.validate_token(&token) {
-        let _ = out_tx.send(Message::Text(
-            serde_json::to_string(&ControlMessage::RegisterAck {
+        let _ = send_control(
+            &out_tx,
+            &ControlMessage::RegisterAck {
                 ok: false,
                 reason: Some("invalid token".to_string()),
-            })
-            .unwrap_or_else(|_| "{}".to_string()),
-        ));
+                protocol_version: Some(PROTOCOL_VERSION),
+                capabilities: relay_capabilities(),
+            },
+        );
         warn!(%tunnel_id, "agent register rejected: invalid token");
         writer_task.abort();
         return;
@@ -85,29 +118,35 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
             AgentHandle {
                 connection_id,
                 sender: out_tx.clone(),
+                capabilities: capabilities.into_iter().collect::<HashSet<_>>(),
+                protocol_version: peer_protocol_version,
             },
         )
         .await;
     if !inserted {
-        let _ = out_tx.send(Message::Text(
-            serde_json::to_string(&ControlMessage::RegisterAck {
+        let _ = send_control(
+            &out_tx,
+            &ControlMessage::RegisterAck {
                 ok: false,
                 reason: Some("tunnel_id already in use".to_string()),
-            })
-            .unwrap_or_else(|_| "{}".to_string()),
-        ));
+                protocol_version: Some(PROTOCOL_VERSION),
+                capabilities: relay_capabilities(),
+            },
+        );
         warn!(%tunnel_id, "agent register rejected: tunnel_id already in use");
         writer_task.abort();
         return;
     }
 
-    let _ = out_tx.send(Message::Text(
-        serde_json::to_string(&ControlMessage::RegisterAck {
+    let _ = send_control(
+        &out_tx,
+        &ControlMessage::RegisterAck {
             ok: true,
             reason: None,
-        })
-        .unwrap_or_else(|_| "{}".to_string()),
-    ));
+            protocol_version: Some(PROTOCOL_VERSION),
+            capabilities: relay_capabilities(),
+        },
+    );
 
     info!(%tunnel_id, %connection_id, "agent connected");
 
@@ -208,8 +247,7 @@ async fn handle_text_message(
         }
         ControlMessage::Ping { ts_ms } => {
             let pong = ControlMessage::Pong { ts_ms };
-            let payload = serde_json::to_string(&pong)?;
-            let _ = out_tx.send(Message::Text(payload));
+            let _ = send_control(out_tx, &pong);
         }
         ControlMessage::Pong { .. } => {}
         other => {
@@ -218,6 +256,10 @@ async fn handle_text_message(
     }
 
     Ok(())
+}
+
+fn relay_capabilities() -> Vec<String> {
+    vec![CAP_WS_TUNNEL_V1.to_string()]
 }
 
 async fn handle_binary_message(state: &AppState, bytes: Bytes) -> anyhow::Result<()> {

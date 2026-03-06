@@ -13,6 +13,8 @@ use uuid::Uuid;
 pub struct AgentHandle {
     pub connection_id: Uuid,
     pub sender: mpsc::UnboundedSender<Message>,
+    pub capabilities: HashSet<String>,
+    pub protocol_version: u8,
 }
 
 #[derive(Debug)]

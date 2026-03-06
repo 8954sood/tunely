@@ -7,7 +7,9 @@ use axum::{
     http::{HeaderMap, HeaderValue, Request, Response, StatusCode, header::HeaderName},
 };
 use futures_util::StreamExt;
-use protocol::{ChunkHeader, ControlMessage, StreamKind, encode_chunk_frame};
+use protocol::{
+    ChunkHeader, ControlMessage, StreamKind, encode_chunk_frame_with_version, is_hop_header,
+};
 use tokio::{
     sync::mpsc,
     time::{Instant, timeout},
@@ -16,6 +18,7 @@ use tracing::{error, warn};
 use uuid::Uuid;
 
 use crate::state::{AppState, RelayEvent};
+use crate::ws_wire::send_control;
 
 pub async fn ingress_root(
     State(state): State<AppState>,
@@ -83,7 +86,9 @@ async fn handle_ingress(
     let (tx, mut rx) = mpsc::channel(128);
     state.add_inflight(request_id, tx);
 
-    if let Err(e) = stream_request_body(&agent.sender, request_id, body).await {
+    if let Err(e) =
+        stream_request_body(&agent.sender, request_id, body, agent.protocol_version).await
+    {
         state.remove_inflight(request_id);
         warn!(error = %e, %request_id, "request body relay failed");
         return simple_response(StatusCode::BAD_GATEWAY, "failed to stream request body");
@@ -179,6 +184,7 @@ async fn stream_request_body(
     sender: &tokio::sync::mpsc::UnboundedSender<axum::extract::ws::Message>,
     request_id: Uuid,
     body: Body,
+    protocol_version: u8,
 ) -> anyhow::Result<()> {
     let mut seq = 0_u32;
     let mut stream = body.into_data_stream();
@@ -189,7 +195,8 @@ async fn stream_request_body(
             continue;
         }
 
-        let frame = encode_chunk_frame(
+        let frame = encode_chunk_frame_with_version(
+            protocol_version,
             ChunkHeader {
                 kind: StreamKind::RequestBody,
                 request_id,
@@ -206,16 +213,6 @@ async fn stream_request_body(
     }
 
     Ok(())
-}
-
-fn send_control(
-    sender: &tokio::sync::mpsc::UnboundedSender<axum::extract::ws::Message>,
-    msg: &ControlMessage,
-) -> anyhow::Result<()> {
-    let payload = serde_json::to_string(msg)?;
-    sender
-        .send(axum::extract::ws::Message::Text(payload))
-        .map_err(|_| anyhow::anyhow!("agent websocket channel closed"))
 }
 
 fn flatten_headers(headers: &HeaderMap) -> Vec<(String, String)> {
@@ -244,20 +241,6 @@ fn apply_forwarded_headers(headers: &mut HeaderMap, forwarded: &[(String, String
         };
         headers.append(name, value);
     }
-}
-
-fn is_hop_header(name: &str) -> bool {
-    matches!(
-        name.to_ascii_lowercase().as_str(),
-        "connection"
-            | "keep-alive"
-            | "proxy-authenticate"
-            | "proxy-authorization"
-            | "te"
-            | "trailers"
-            | "transfer-encoding"
-            | "upgrade"
-    )
 }
 
 pub(crate) fn extract_target_path(

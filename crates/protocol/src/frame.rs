@@ -1,7 +1,7 @@
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::PROTOCOL_VERSION;
+use crate::{PROTOCOL_VERSION, is_supported_protocol_version};
 
 const HEADER_LEN: usize = 1 + 1 + 16 + 4 + 1;
 
@@ -76,8 +76,16 @@ pub enum ChunkDecodeError {
 }
 
 pub fn encode_chunk_frame(header: ChunkHeader, payload: &[u8]) -> Vec<u8> {
+    encode_chunk_frame_with_version(PROTOCOL_VERSION, header, payload)
+}
+
+pub fn encode_chunk_frame_with_version(
+    version: u8,
+    header: ChunkHeader,
+    payload: &[u8],
+) -> Vec<u8> {
     let mut out = Vec::with_capacity(HEADER_LEN + payload.len());
-    out.push(PROTOCOL_VERSION);
+    out.push(version);
     out.push(header.kind as u8);
     out.extend_from_slice(header.request_id.as_bytes());
     out.extend_from_slice(&header.seq.to_be_bytes());
@@ -92,7 +100,7 @@ pub fn decode_chunk_header(frame: &[u8]) -> Result<(ChunkHeader, &[u8]), ChunkDe
     }
 
     let version = frame[0];
-    if version != PROTOCOL_VERSION {
+    if !is_supported_protocol_version(version) {
         return Err(ChunkDecodeError::UnsupportedVersion(version));
     }
 

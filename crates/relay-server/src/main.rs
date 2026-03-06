@@ -4,6 +4,7 @@ mod ingress;
 mod state;
 mod ws_session;
 mod ws_tunnel;
+mod ws_wire;
 
 use anyhow::Context;
 use axum::{Router, routing::any, routing::get};

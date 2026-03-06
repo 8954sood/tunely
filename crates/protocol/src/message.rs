@@ -7,10 +7,18 @@ pub enum ControlMessage {
     RegisterAgent {
         tunnel_id: String,
         token: String,
+        #[serde(default)]
+        protocol_version: Option<u8>,
+        #[serde(default)]
+        capabilities: Vec<String>,
     },
     RegisterAck {
         ok: bool,
         reason: Option<String>,
+        #[serde(default)]
+        protocol_version: Option<u8>,
+        #[serde(default)]
+        capabilities: Vec<String>,
     },
     HttpRequestStart {
         request_id: Uuid,

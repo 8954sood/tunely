@@ -1,3 +1,4 @@
+use protocol::is_hop_header;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use url::Url;
 
@@ -24,20 +25,6 @@ pub fn compose_local_ws_url(base: &str, path_and_query: &str) -> anyhow::Result<
     url.set_scheme(scheme)
         .map_err(|_| anyhow::anyhow!("failed to set websocket scheme"))?;
     Ok(url)
-}
-
-pub fn is_hop_header(name: &str) -> bool {
-    matches!(
-        name.to_ascii_lowercase().as_str(),
-        "connection"
-            | "keep-alive"
-            | "proxy-authenticate"
-            | "proxy-authorization"
-            | "te"
-            | "trailers"
-            | "transfer-encoding"
-            | "upgrade"
-    )
 }
 
 pub fn apply_forward_headers(
