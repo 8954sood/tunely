@@ -132,14 +132,12 @@ impl AppState {
             .inflight
             .get(&request_id)
             .map(|entry| entry.value().clone())
-        {
-            if sender
+            && sender
                 .send(RelayEvent::Start { status, headers })
                 .await
                 .is_err()
-            {
-                self.inflight.remove(&request_id);
-            }
+        {
+            self.inflight.remove(&request_id);
         }
     }
 
@@ -148,10 +146,9 @@ impl AppState {
             .inflight
             .get(&request_id)
             .map(|entry| entry.value().clone())
+            && sender.send(RelayEvent::Body(bytes)).await.is_err()
         {
-            if sender.send(RelayEvent::Body(bytes)).await.is_err() {
-                self.inflight.remove(&request_id);
-            }
+            self.inflight.remove(&request_id);
         }
     }
 
@@ -216,13 +213,11 @@ impl AppState {
             .ws_streams
             .get(&stream_id)
             .map(|entry| entry.value().sender.clone())
-        {
-            if sender
+            && sender
                 .send(WsRelayEvent::Frame { opcode, payload })
                 .is_err()
-            {
-                self.ws_streams.remove(&stream_id);
-            }
+        {
+            self.ws_streams.remove(&stream_id);
         }
     }
 

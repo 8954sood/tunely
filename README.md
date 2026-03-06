@@ -61,6 +61,8 @@ request_timeout_secs: 60
 ## 테스트
 
 ```bash
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 

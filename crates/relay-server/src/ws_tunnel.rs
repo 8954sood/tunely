@@ -137,7 +137,7 @@ async fn handle_client_socket(
                 };
                 match client {
                     Ok(Message::Text(text)) => {
-                        if send_ws_frame(&agent_sender, stream_id, agent_protocol_version, StreamKind::WsClientFrame, WsOpcode::Text, text.as_str().as_bytes()).is_err() {
+                        if send_ws_frame(&agent_sender, stream_id, agent_protocol_version, StreamKind::WsClientFrame, WsOpcode::Text, text.as_bytes()).is_err() {
                             break;
                         }
                     }
@@ -186,7 +186,7 @@ async fn handle_client_socket(
                         let out = match opcode {
                             WsOpcode::Text => {
                                 match std::str::from_utf8(&payload) {
-                                    Ok(text) => Message::Text(text.to_string().into()),
+                                    Ok(text) => Message::Text(text.to_string()),
                                     Err(_) => {
                                         warn!(%tunnel_id, %stream_id, "invalid utf8 in ws text payload from agent");
                                         Message::Close(Some(CloseFrame {
@@ -245,7 +245,7 @@ fn send_ws_frame(
         &encode_ws_payload(opcode, payload),
     );
     sender
-        .send(Message::Binary(frame.into()))
+        .send(Message::Binary(frame))
         .map_err(|_| anyhow::anyhow!("agent websocket channel closed"))
 }
 
