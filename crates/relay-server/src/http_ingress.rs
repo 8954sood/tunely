@@ -208,7 +208,7 @@ async fn stream_request_body(
         seq = seq.wrapping_add(1);
 
         sender
-            .send(axum::extract::ws::Message::Binary(frame.into()))
+            .send(axum::extract::ws::Message::Binary(frame))
             .map_err(|_| anyhow::anyhow!("agent websocket channel closed"))?;
     }
 

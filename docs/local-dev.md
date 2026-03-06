@@ -2,6 +2,18 @@
 
 기여자가 소스에서 직접 빌드하고 로컬에서 relay + agent를 실행하는 방법을 설명합니다.
 
+## 0) PR 전 로컬 검증 (CI 동일)
+
+PR을 올리기 전에 아래 3개를 순서대로 실행하세요.
+
+```bash
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+```
+
+위 명령은 `.github/workflows/ci.yml`와 동일한 검증 기준입니다.
+
 ## 사전 요구사항
 
 - Rust toolchain (`rustup` 권장)

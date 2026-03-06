@@ -8,6 +8,6 @@ pub fn send_control(
 ) -> anyhow::Result<()> {
     let payload = serde_json::to_string(msg)?;
     sender
-        .send(Message::Text(payload.into()))
+        .send(Message::Text(payload))
         .map_err(|_| anyhow::anyhow!("agent websocket channel closed"))
 }

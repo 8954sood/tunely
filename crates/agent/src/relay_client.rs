@@ -60,6 +60,31 @@ struct RegisterAckInfo {
     relay_capabilities: Vec<String>,
 }
 
+#[derive(Clone)]
+struct RuntimeCtx {
+    ws_sessions: WsSessionMap,
+    relay_tx: mpsc::UnboundedSender<Message>,
+    client: reqwest::Client,
+    local_base: String,
+    relay_supports_ws: bool,
+    relay_frame_version: u8,
+}
+
+struct ProxyRequest {
+    request_id: Uuid,
+    method: String,
+    path_and_query: String,
+    headers: Vec<(String, String)>,
+    body_rx: BodyReceiver,
+}
+
+struct WsConnectRequest {
+    stream_id: Uuid,
+    path_and_query: String,
+    headers: Vec<(String, String)>,
+    subprotocols: Vec<String>,
+}
+
 pub async fn run(config: Config) -> anyhow::Result<()> {
     let mut attempt: u32 = 0;
 
@@ -123,22 +148,20 @@ async fn run_once(config: &Config) -> anyhow::Result<()> {
     let client = reqwest::Client::new();
     let mut inflight = Inflight::default();
     let ws_sessions: WsSessionMap = Arc::new(Mutex::new(HashMap::new()));
+    let runtime_ctx = RuntimeCtx {
+        ws_sessions: ws_sessions.clone(),
+        relay_tx: out_tx.clone(),
+        client,
+        local_base: config.local.clone(),
+        relay_supports_ws,
+        relay_frame_version,
+    };
 
     while let Some(msg) = ws_reader.next().await {
         let msg = msg?;
         match msg {
             Message::Text(text) => {
-                handle_text_message(
-                    text,
-                    &mut inflight,
-                    ws_sessions.clone(),
-                    &out_tx,
-                    &client,
-                    config.local.clone(),
-                    relay_supports_ws,
-                    relay_frame_version,
-                )
-                .await;
+                handle_text_message(text, &mut inflight, &runtime_ctx).await;
             }
             Message::Binary(bytes) => {
                 handle_binary_message(bytes.into(), &mut inflight, ws_sessions.clone()).await;
@@ -227,16 +250,7 @@ async fn wait_register_ack(
     }
 }
 
-async fn handle_text_message(
-    text: String,
-    inflight: &mut Inflight,
-    ws_sessions: WsSessionMap,
-    relay_tx: &mpsc::UnboundedSender<Message>,
-    client: &reqwest::Client,
-    local_base: String,
-    relay_supports_ws: bool,
-    relay_frame_version: u8,
-) {
+async fn handle_text_message(text: String, inflight: &mut Inflight, runtime_ctx: &RuntimeCtx) {
     let parsed = match serde_json::from_str::<ControlMessage>(&text) {
         Ok(msg) => msg,
         Err(err) => {
@@ -255,25 +269,19 @@ async fn handle_text_message(
             let (body_tx, body_rx) = tokio::sync::mpsc::channel(128);
             inflight.insert(request_id, body_tx);
 
-            let relay_tx = relay_tx.clone();
-            let client = client.clone();
+            let runtime_ctx = runtime_ctx.clone();
             tokio::spawn(async move {
-                if let Err(err) = proxy_one_request(
+                let request = ProxyRequest {
                     request_id,
                     method,
                     path_and_query,
                     headers,
                     body_rx,
-                    &client,
-                    local_base,
-                    &relay_tx,
-                    relay_frame_version,
-                )
-                .await
-                {
+                };
+                if let Err(err) = proxy_one_request(request, runtime_ctx.clone()).await {
                     error!(error = %err, %request_id, "local proxy failed");
                     let _ = send_control(
-                        &relay_tx,
+                        &runtime_ctx.relay_tx,
                         &ControlMessage::Error {
                             request_id: Some(request_id),
                             code: "local_proxy_error".to_string(),
@@ -292,10 +300,10 @@ async fn handle_text_message(
             headers,
             subprotocols,
         } => {
-            if !relay_supports_ws {
+            if !runtime_ctx.relay_supports_ws {
                 warn!(%stream_id, "relay did not advertise ws_tunnel_v1; rejecting ws connect");
                 let _ = send_control(
-                    relay_tx,
+                    &runtime_ctx.relay_tx,
                     &ControlMessage::WsConnectAck {
                         stream_id,
                         ok: false,
@@ -307,19 +315,15 @@ async fn handle_text_message(
                 );
                 return;
             }
-            let relay_tx = relay_tx.clone();
+            let runtime_ctx = runtime_ctx.clone();
             tokio::spawn(async move {
-                handle_ws_connect(
+                let request = WsConnectRequest {
                     stream_id,
                     path_and_query,
                     headers,
                     subprotocols,
-                    local_base,
-                    relay_tx,
-                    ws_sessions,
-                    relay_frame_version,
-                )
-                .await;
+                };
+                handle_ws_connect(request, runtime_ctx).await;
             });
         }
         ControlMessage::WsClose {
@@ -327,12 +331,18 @@ async fn handle_text_message(
             code,
             reason,
         } => {
-            if let Some(sender) = ws_sessions.lock().await.get(&stream_id).cloned() {
+            if let Some(sender) = runtime_ctx
+                .ws_sessions
+                .lock()
+                .await
+                .get(&stream_id)
+                .cloned()
+            {
                 let _ = sender.send(WsInboundEvent::Close { code, reason });
             }
         }
         ControlMessage::Ping { ts_ms } => {
-            let _ = send_control(relay_tx, &ControlMessage::Pong { ts_ms });
+            let _ = send_control(&runtime_ctx.relay_tx, &ControlMessage::Pong { ts_ms });
         }
         ControlMessage::Error { request_id, .. } => {
             if let Some(request_id) = request_id {
@@ -357,14 +367,13 @@ async fn handle_binary_message(bytes: Bytes, inflight: &mut Inflight, ws_session
 
     match header.kind {
         StreamKind::RequestBody => {
-            if let Some(sender) = inflight.get(&header.request_id) {
-                if sender
+            if let Some(sender) = inflight.get(&header.request_id)
+                && sender
                     .send(Ok(Bytes::copy_from_slice(payload)))
                     .await
                     .is_err()
-                {
-                    inflight.remove(&header.request_id);
-                }
+            {
+                inflight.remove(&header.request_id);
             }
 
             if header.fin {
@@ -396,31 +405,13 @@ async fn handle_binary_message(bytes: Bytes, inflight: &mut Inflight, ws_session
     }
 }
 
-async fn handle_ws_connect(
-    stream_id: Uuid,
-    path_and_query: String,
-    headers: Vec<(String, String)>,
-    subprotocols: Vec<String>,
-    local_base: String,
-    relay_tx: mpsc::UnboundedSender<Message>,
-    ws_sessions: WsSessionMap,
-    relay_frame_version: u8,
-) {
-    let result = run_one_ws_stream(
-        stream_id,
-        path_and_query,
-        headers,
-        subprotocols,
-        local_base,
-        relay_tx.clone(),
-        ws_sessions.clone(),
-        relay_frame_version,
-    )
-    .await;
+async fn handle_ws_connect(request: WsConnectRequest, runtime_ctx: RuntimeCtx) {
+    let stream_id = request.stream_id;
+    let result = run_one_ws_stream(request, runtime_ctx.clone()).await;
 
     if let Err(err) = result {
         let _ = send_control(
-            &relay_tx,
+            &runtime_ctx.relay_tx,
             &ControlMessage::WsConnectAck {
                 stream_id,
                 ok: false,
@@ -428,22 +419,22 @@ async fn handle_ws_connect(
                 reason: Some(err.to_string()),
             },
         );
-        let mut sessions = ws_sessions.lock().await;
+        let mut sessions = runtime_ctx.ws_sessions.lock().await;
         sessions.remove(&stream_id);
     }
 }
 
 async fn run_one_ws_stream(
-    stream_id: Uuid,
-    path_and_query: String,
-    headers: Vec<(String, String)>,
-    subprotocols: Vec<String>,
-    local_base: String,
-    relay_tx: mpsc::UnboundedSender<Message>,
-    ws_sessions: WsSessionMap,
-    relay_frame_version: u8,
+    request: WsConnectRequest,
+    runtime_ctx: RuntimeCtx,
 ) -> anyhow::Result<()> {
-    let local_url = compose_local_ws_url(&local_base, &path_and_query)?;
+    let WsConnectRequest {
+        stream_id,
+        path_and_query,
+        headers,
+        subprotocols,
+    } = request;
+    let local_url = compose_local_ws_url(&runtime_ctx.local_base, &path_and_query)?;
     let mut request = local_url.as_str().into_client_request()?;
 
     {
@@ -476,7 +467,7 @@ async fn run_one_ws_stream(
         .map(|value| value.to_string());
 
     send_control(
-        &relay_tx,
+        &runtime_ctx.relay_tx,
         &ControlMessage::WsConnectAck {
             stream_id,
             ok: true,
@@ -487,7 +478,11 @@ async fn run_one_ws_stream(
 
     let (local_sink, mut local_stream) = local_ws.split();
     let (in_tx, mut in_rx) = mpsc::unbounded_channel::<WsInboundEvent>();
-    ws_sessions.lock().await.insert(stream_id, in_tx);
+    runtime_ctx
+        .ws_sessions
+        .lock()
+        .await
+        .insert(stream_id, in_tx);
     let mut local_sink = local_sink;
 
     loop {
@@ -526,7 +521,7 @@ async fn run_one_ws_stream(
             }
             from_local = local_stream.next() => {
                 let Some(from_local) = from_local else {
-                    let _ = send_control(&relay_tx, &ControlMessage::WsClose {
+                    let _ = send_control(&runtime_ctx.relay_tx, &ControlMessage::WsClose {
                         stream_id,
                         code: Some(1000),
                         reason: Some("local ws ended".to_string()),
@@ -535,22 +530,22 @@ async fn run_one_ws_stream(
                 };
                 match from_local {
                     Ok(Message::Text(text)) => {
-                        if send_ws_frame_to_relay(&relay_tx, relay_frame_version, stream_id, StreamKind::WsLocalFrame, WsOpcode::Text, text.as_bytes()).is_err() {
+                        if send_ws_frame_to_relay(&runtime_ctx.relay_tx, runtime_ctx.relay_frame_version, stream_id, StreamKind::WsLocalFrame, WsOpcode::Text, text.as_bytes()).is_err() {
                             break;
                         }
                     }
                     Ok(Message::Binary(bytes)) => {
-                        if send_ws_frame_to_relay(&relay_tx, relay_frame_version, stream_id, StreamKind::WsLocalFrame, WsOpcode::Binary, &bytes).is_err() {
+                        if send_ws_frame_to_relay(&runtime_ctx.relay_tx, runtime_ctx.relay_frame_version, stream_id, StreamKind::WsLocalFrame, WsOpcode::Binary, &bytes).is_err() {
                             break;
                         }
                     }
                     Ok(Message::Ping(bytes)) => {
-                        if send_ws_frame_to_relay(&relay_tx, relay_frame_version, stream_id, StreamKind::WsLocalFrame, WsOpcode::Ping, &bytes).is_err() {
+                        if send_ws_frame_to_relay(&runtime_ctx.relay_tx, runtime_ctx.relay_frame_version, stream_id, StreamKind::WsLocalFrame, WsOpcode::Ping, &bytes).is_err() {
                             break;
                         }
                     }
                     Ok(Message::Pong(bytes)) => {
-                        if send_ws_frame_to_relay(&relay_tx, relay_frame_version, stream_id, StreamKind::WsLocalFrame, WsOpcode::Pong, &bytes).is_err() {
+                        if send_ws_frame_to_relay(&runtime_ctx.relay_tx, runtime_ctx.relay_frame_version, stream_id, StreamKind::WsLocalFrame, WsOpcode::Pong, &bytes).is_err() {
                             break;
                         }
                     }
@@ -558,7 +553,7 @@ async fn run_one_ws_stream(
                         let (code, reason) = close
                             .map(|c| (Some(u16::from(c.code)), Some(c.reason.to_string())))
                             .unwrap_or((Some(1000), None));
-                        let _ = send_control(&relay_tx, &ControlMessage::WsClose {
+                        let _ = send_control(&runtime_ctx.relay_tx, &ControlMessage::WsClose {
                             stream_id,
                             code,
                             reason,
@@ -567,7 +562,7 @@ async fn run_one_ws_stream(
                     }
                     Ok(Message::Frame(_)) => {}
                     Err(err) => {
-                        let _ = send_control(&relay_tx, &ControlMessage::WsClose {
+                        let _ = send_control(&runtime_ctx.relay_tx, &ControlMessage::WsClose {
                             stream_id,
                             code: Some(1011),
                             reason: Some(format!("local ws read error: {err}")),
@@ -580,7 +575,7 @@ async fn run_one_ws_stream(
     }
 
     drop(in_rx);
-    cleanup_ws_session(&ws_sessions, stream_id).await;
+    cleanup_ws_session(&runtime_ctx.ws_sessions, stream_id).await;
     Ok(())
 }
 
@@ -613,22 +608,20 @@ fn send_ws_frame_to_relay(
         .map_err(|_| anyhow::anyhow!("relay channel closed"))
 }
 
-async fn proxy_one_request(
-    request_id: Uuid,
-    method: String,
-    path_and_query: String,
-    headers: Vec<(String, String)>,
-    body_rx: BodyReceiver,
-    client: &reqwest::Client,
-    local_base: String,
-    relay_tx: &mpsc::UnboundedSender<Message>,
-    relay_frame_version: u8,
-) -> anyhow::Result<()> {
-    let local_url = compose_local_url(&local_base, &path_and_query)?;
+async fn proxy_one_request(request: ProxyRequest, runtime_ctx: RuntimeCtx) -> anyhow::Result<()> {
+    let ProxyRequest {
+        request_id,
+        method,
+        path_and_query,
+        headers,
+        body_rx,
+    } = request;
+    let local_url = compose_local_url(&runtime_ctx.local_base, &path_and_query)?;
     let method = reqwest::Method::from_bytes(method.as_bytes())?;
 
     let stream_body = ReceiverStream::new(body_rx);
-    let req = client
+    let req = runtime_ctx
+        .client
         .request(method, local_url)
         .body(reqwest::Body::wrap_stream(stream_body));
     let req = apply_forward_headers(req, &headers);
@@ -640,7 +633,7 @@ async fn proxy_one_request(
         status: response.status().as_u16(),
         headers: flatten_response_headers(response.headers()),
     };
-    send_control(relay_tx, &start)?;
+    send_control(&runtime_ctx.relay_tx, &start)?;
 
     let mut seq = 0_u32;
     let mut byte_stream = response.bytes_stream();
@@ -651,7 +644,7 @@ async fn proxy_one_request(
         }
 
         let frame = encode_chunk_frame_with_version(
-            relay_frame_version,
+            runtime_ctx.relay_frame_version,
             ChunkHeader {
                 kind: StreamKind::ResponseBody,
                 request_id,
@@ -661,12 +654,16 @@ async fn proxy_one_request(
             &chunk,
         );
         seq = seq.wrapping_add(1);
-        relay_tx
+        runtime_ctx
+            .relay_tx
             .send(Message::Binary(frame))
             .map_err(|_| anyhow::anyhow!("relay channel closed"))?;
     }
 
-    send_control(relay_tx, &ControlMessage::HttpResponseEnd { request_id })?;
+    send_control(
+        &runtime_ctx.relay_tx,
+        &ControlMessage::HttpResponseEnd { request_id },
+    )?;
     Ok(())
 }
 
