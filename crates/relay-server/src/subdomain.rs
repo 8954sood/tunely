@@ -104,9 +104,9 @@ impl SubdomainProvisioner {
     }
 
     async fn ensure_caddy_route(&self, tunnel_id: &str, host: &str) -> anyhow::Result<()> {
-        let url = format!("{}/id/{}", self.caddy_admin_base(), route_id(tunnel_id));
-        let body = json!({
-            "@id": route_id(tunnel_id),
+        let route_id = route_id(tunnel_id);
+        let route = json!({
+            "@id": route_id,
             "match": [
                 {
                     "host": [host],
@@ -128,14 +128,61 @@ impl SubdomainProvisioner {
             ],
             "terminal": true,
         });
-        let response = self.client.put(url).json(&body).send().await?;
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response
+        let url = format!("{}/id/{}", self.caddy_admin_base(), route_id);
+        let response = self.client.put(url).json(&route).send().await?;
+        if response.status().is_success() {
+            return Ok(());
+        }
+        if response.status().as_u16() == 404 {
+            return self.create_caddy_route(&route).await;
+        }
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .unwrap_or_else(|_| "<failed to read response>".to_string());
+        anyhow::bail!("caddy route upsert failed ({status}): {body}");
+    }
+
+    async fn create_caddy_route(&self, route: &serde_json::Value) -> anyhow::Result<()> {
+        let servers_url = format!("{}/config/apps/http/servers", self.caddy_admin_base());
+        let servers_response = self.client.get(&servers_url).send().await?;
+        if !servers_response.status().is_success() {
+            let status = servers_response.status();
+            let body = servers_response
                 .text()
                 .await
                 .unwrap_or_else(|_| "<failed to read response>".to_string());
-            anyhow::bail!("caddy route upsert failed ({status}): {body}");
+            anyhow::bail!("caddy servers lookup failed ({status}): {body}");
+        }
+
+        let servers: serde_json::Value = servers_response.json().await.context(
+            "invalid caddy servers lookup response (expected JSON object at /config/apps/http/servers)",
+        )?;
+        let server_id = servers
+            .as_object()
+            .and_then(|o| {
+                if o.contains_key("srv0") {
+                    Some("srv0".to_string())
+                } else {
+                    o.keys().next().cloned()
+                }
+            })
+            .context("no HTTP servers found in Caddy config")?;
+
+        let routes_url = format!(
+            "{}/config/apps/http/servers/{}/routes",
+            self.caddy_admin_base(),
+            server_id
+        );
+        let create_response = self.client.post(routes_url).json(route).send().await?;
+        if !create_response.status().is_success() {
+            let status = create_response.status();
+            let body = create_response
+                .text()
+                .await
+                .unwrap_or_else(|_| "<failed to read response>".to_string());
+            anyhow::bail!("caddy route create failed ({status}): {body}");
         }
         Ok(())
     }
