@@ -92,8 +92,15 @@ cargo run -p tunely -- agent \
 | `--tunnel-id` | (필수) | 터널 식별자 |
 | `--token` | (필수) | Relay auth_tokens에 포함된 토큰 |
 | `--local` | (필수) | 프록시할 로컬 서비스 URL |
+| `--request-subdomain` | `false` | relay 동적 서브도메인 모드 사용 시 서브도메인 자동 생성 요청 |
 | `--ping-interval-secs` | `20` | WebSocket ping 간격 |
 | `--max-backoff-secs` | `30` | 재연결 최대 백오프 |
+
+`--request-subdomain` 사용 시:
+
+- relay에 동적 서브도메인 설정이 필요합니다.
+- `tunnel_id`는 소문자/숫자/하이픈(`-`)만 사용해야 합니다.
+- 연결 성공 로그에 경로 URL과 서브도메인 URL이 함께 표시됩니다.
 
 ## 4) 동작 확인 (echo-server + test-client)
 

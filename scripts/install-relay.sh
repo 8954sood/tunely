@@ -257,6 +257,13 @@ ensure_config_files() {
 #   - "xxx"
 #   - "yyy"
 # request_timeout_secs: 60
+# enable_dynamic_subdomain: false
+# base_domain: "example.com"
+# cloudflare_api_token: "cf_token"
+# cloudflare_zone_id: "cf_zone_id"
+# public_origin: "1.2.3.4"
+# caddy_admin_url: "http://127.0.0.1:2019"
+# caddy_upstream: "127.0.0.1:8080"
 YAML
   fi
 }

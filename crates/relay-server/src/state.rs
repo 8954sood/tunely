@@ -9,6 +9,8 @@ use protocol::WsOpcode;
 use tokio::sync::{RwLock, mpsc, oneshot};
 use uuid::Uuid;
 
+use crate::subdomain::SubdomainProvisioner;
+
 #[derive(Debug, Clone)]
 pub struct AgentHandle {
     pub connection_id: Uuid,
@@ -69,23 +71,33 @@ pub struct AppState {
     inflight: Arc<DashMap<Uuid, mpsc::Sender<RelayEvent>>>,
     ws_pending: Arc<DashMap<Uuid, WsPending>>,
     ws_streams: Arc<DashMap<Uuid, WsStreamHandle>>,
+    subdomain: Option<Arc<SubdomainProvisioner>>,
     pub request_timeout_secs: u64,
 }
 
 impl AppState {
-    pub fn new(auth_tokens: HashSet<String>, request_timeout_secs: u64) -> Self {
+    pub fn new(
+        auth_tokens: HashSet<String>,
+        request_timeout_secs: u64,
+        subdomain: Option<Arc<SubdomainProvisioner>>,
+    ) -> Self {
         Self {
             auth_tokens: Arc::new(auth_tokens),
             agents: Arc::new(RwLock::new(HashMap::new())),
             inflight: Arc::new(DashMap::new()),
             ws_pending: Arc::new(DashMap::new()),
             ws_streams: Arc::new(DashMap::new()),
+            subdomain,
             request_timeout_secs,
         }
     }
 
     pub fn validate_token(&self, token: &str) -> bool {
         !self.auth_tokens.is_empty() && self.auth_tokens.contains(token)
+    }
+
+    pub fn subdomain(&self) -> Option<Arc<SubdomainProvisioner>> {
+        self.subdomain.clone()
     }
 
     pub async fn insert_agent_if_absent(&self, tunnel_id: String, handle: AgentHandle) -> bool {

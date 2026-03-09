@@ -8,6 +8,8 @@ pub enum ControlMessage {
         tunnel_id: String,
         token: String,
         #[serde(default)]
+        request_subdomain: bool,
+        #[serde(default)]
         protocol_version: Option<u8>,
         #[serde(default)]
         capabilities: Vec<String>,
@@ -15,6 +17,10 @@ pub enum ControlMessage {
     RegisterAck {
         ok: bool,
         reason: Option<String>,
+        #[serde(default)]
+        subdomain: Option<String>,
+        #[serde(default)]
+        public_url: Option<String>,
         #[serde(default)]
         protocol_version: Option<u8>,
         #[serde(default)]

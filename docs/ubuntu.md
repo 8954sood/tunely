@@ -37,6 +37,18 @@ auth_tokens:
 request_timeout_secs: 60
 ```
 
+동적 서브도메인 모드 예시(선택):
+
+```yaml
+enable_dynamic_subdomain: true
+base_domain: "example.com"
+cloudflare_api_token: "<CF_API_TOKEN>"
+cloudflare_zone_id: "<CF_ZONE_ID>"
+public_origin: "1.2.3.4"
+caddy_admin_url: "http://127.0.0.1:2019"
+caddy_upstream: "127.0.0.1:8080"
+```
+
 적용:
 
 ```bash
@@ -53,6 +65,18 @@ curl -fsSL https://raw.githubusercontent.com/8954sood/tunely/main/scripts/instal
     --tunnel-id demo \
     --token xxx \
     --local http://127.0.0.1:3000
+```
+
+동적 서브도메인 모드 사용 시 agent 설치 예시:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/8954sood/tunely/main/scripts/install-agent.sh | \
+  sudo bash -s -- \
+    --relay wss://relay.example.com/ws \
+    --tunnel-id demo \
+    --token xxx \
+    --local http://127.0.0.1:3000 \
+    --request-subdomain
 ```
 
 ## 2) non-systemd 환경 (Docker/WSL)
@@ -77,6 +101,13 @@ curl -fsSL https://raw.githubusercontent.com/8954sood/tunely/main/scripts/instal
 ```bash
 tunely relay --config /etc/tunely/relay.yaml
 tunely agent --relay ws://<RELAY_PUBLIC_IP_OR_DOMAIN>:8080/ws --tunnel-id demo --token xxx --local http://127.0.0.1:3000
+```
+
+동적 서브도메인 수동 실행 예시:
+
+```bash
+tunely relay --config /etc/tunely/relay.yaml
+tunely agent --relay wss://relay.example.com/ws --tunnel-id demo --token xxx --local http://127.0.0.1:3000 --request-subdomain
 ```
 
 ## 3) 버전 고정 설치
@@ -128,5 +159,6 @@ curl -fsSL https://raw.githubusercontent.com/8954sood/tunely/main/scripts/uninst
 ## 관련 문서
 
 - Caddy 설정: [caddy.md](caddy.md)
+- 설정 레퍼런스: [config.md](config.md)
 - 빌드/릴리즈: [build-and-release.md](build-and-release.md)
 - 트러블슈팅: [troubleshooting.md](troubleshooting.md)

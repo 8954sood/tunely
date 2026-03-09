@@ -58,6 +58,8 @@ type WsSessionMap = Arc<Mutex<HashMap<Uuid, WsInboundSender>>>;
 struct RegisterAckInfo {
     relay_protocol_version: u8,
     relay_capabilities: Vec<String>,
+    subdomain: Option<String>,
+    public_url: Option<String>,
 }
 
 #[derive(Clone)]
@@ -117,10 +119,30 @@ async fn run_once(config: &Config) -> anyhow::Result<()> {
         .relay_capabilities
         .iter()
         .any(|capability| capability == CAP_WS_TUNNEL_V1);
-    if let Some(public_url) = derive_public_tunnel_url(&config.relay, &config.tunnel_id) {
-        info!(tunnel_id = %config.tunnel_id, %public_url, "agent registered; client access URL");
-    } else {
-        info!(tunnel_id = %config.tunnel_id, "agent registered");
+    let path_public_url = derive_public_tunnel_url(&config.relay, &config.tunnel_id);
+    let subdomain_public_url = register_ack.public_url.or_else(|| {
+        register_ack
+            .subdomain
+            .as_deref()
+            .and_then(|subdomain| derive_subdomain_url(&config.relay, subdomain))
+    });
+    match (path_public_url, subdomain_public_url) {
+        (Some(path_public_url), Some(subdomain_public_url)) => {
+            info!(
+                tunnel_id = %config.tunnel_id,
+                %path_public_url,
+                %subdomain_public_url,
+                "agent registered; client access URLs"
+            );
+        }
+        (Some(path_public_url), None) => {
+            info!(
+                tunnel_id = %config.tunnel_id,
+                %path_public_url,
+                "agent registered; client access URL"
+            );
+        }
+        _ => info!(tunnel_id = %config.tunnel_id, "agent registered"),
     }
 
     let (out_tx, mut out_rx) = mpsc::unbounded_channel::<Message>();
@@ -194,6 +216,7 @@ async fn send_register(
     let register = ControlMessage::RegisterAgent {
         tunnel_id: config.tunnel_id.clone(),
         token: config.token.clone(),
+        request_subdomain: config.request_subdomain,
         protocol_version: Some(PROTOCOL_VERSION),
         capabilities: vec![CAP_WS_TUNNEL_V1.to_string()],
     };
@@ -223,6 +246,8 @@ async fn wait_register_ack(
     match ack {
         ControlMessage::RegisterAck {
             ok: true,
+            subdomain,
+            public_url,
             protocol_version,
             capabilities,
             ..
@@ -236,6 +261,8 @@ async fn wait_register_ack(
             Ok(RegisterAckInfo {
                 relay_protocol_version,
                 relay_capabilities: capabilities,
+                subdomain,
+                public_url,
             })
         }
         ControlMessage::RegisterAck {
@@ -716,9 +743,26 @@ fn derive_public_tunnel_url(relay_url: &str, tunnel_id: &str) -> Option<String> 
     Some(url.to_string())
 }
 
+fn derive_subdomain_url(relay_url: &str, subdomain: &str) -> Option<String> {
+    let mut url = Url::parse(relay_url).ok()?;
+    let scheme = match url.scheme() {
+        "ws" => "http",
+        "wss" => "https",
+        "http" => "http",
+        "https" => "https",
+        _ => return None,
+    };
+    url.set_scheme(scheme).ok()?;
+    url.set_host(Some(subdomain)).ok()?;
+    url.set_path("/");
+    url.set_query(None);
+    url.set_fragment(None);
+    Some(url.to_string())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{backoff_with_jitter, derive_public_tunnel_url};
+    use super::{backoff_with_jitter, derive_public_tunnel_url, derive_subdomain_url};
 
     #[test]
     fn backoff_is_bounded() {
@@ -737,5 +781,12 @@ mod tests {
         let url =
             derive_public_tunnel_url("wss://relay.example.com/proxy/ws", "demo").expect("url");
         assert_eq!(url, "https://relay.example.com/proxy/t/demo/");
+    }
+
+    #[test]
+    fn derive_subdomain_url_from_wss() {
+        let url = derive_subdomain_url("wss://relay.example.com/proxy/ws", "demo.example.com")
+            .expect("url");
+        assert_eq!(url, "https://demo.example.com/");
     }
 }

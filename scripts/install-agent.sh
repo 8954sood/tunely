@@ -21,6 +21,7 @@ TOKEN=""
 LOCAL=""
 PING_INTERVAL_SECS="20"
 MAX_BACKOFF_SECS="30"
+REQUEST_SUBDOMAIN="false"
 TMP_DIR=""
 
 usage() {
@@ -37,6 +38,7 @@ Required:
 Options:
   --ping-interval-secs <sec>     Default: 20
   --max-backoff-secs <sec>       Default: 30
+  --request-subdomain            Request dynamic subdomain provisioning
   --binary <path>                agent binary path
   --tunely-binary <path>         tunely binary path
   --repo <owner/repo>            Default: 8954sood/tunely
@@ -221,6 +223,10 @@ parse_args() {
         MAX_BACKOFF_SECS="${2:-}"
         shift 2
         ;;
+      --request-subdomain)
+        REQUEST_SUBDOMAIN="true"
+        shift
+        ;;
       --binary)
         AGENT_BIN_SOURCE="${2:-}"
         shift 2
@@ -300,7 +306,7 @@ Type=simple
 User=${RUN_USER}
 Group=${RUN_GROUP}
 EnvironmentFile=${CONFIG_DIR}/agent.env
-ExecStart=${INSTALL_DIR}/tunely agent --relay \${RELAY} --tunnel-id \${TUNNEL_ID} --token \${TOKEN} --local \${LOCAL} --ping-interval-secs \${PING_INTERVAL_SECS} --max-backoff-secs \${MAX_BACKOFF_SECS}
+ExecStart=${INSTALL_DIR}/tunely agent --relay \${RELAY} --tunnel-id \${TUNNEL_ID} --token \${TOKEN} --local \${LOCAL} --ping-interval-secs \${PING_INTERVAL_SECS} --max-backoff-secs \${MAX_BACKOFF_SECS} \${REQUEST_SUBDOMAIN_ARG}
 Restart=always
 RestartSec=2
 NoNewPrivileges=true
@@ -329,7 +335,14 @@ TOKEN=${TOKEN}
 LOCAL=${LOCAL}
 PING_INTERVAL_SECS=${PING_INTERVAL_SECS}
 MAX_BACKOFF_SECS=${MAX_BACKOFF_SECS}
+REQUEST_SUBDOMAIN=${REQUEST_SUBDOMAIN}
 ENV
+
+  if [[ "${REQUEST_SUBDOMAIN}" == "true" ]]; then
+    echo "REQUEST_SUBDOMAIN_ARG=--request-subdomain" >> "${CONFIG_DIR}/agent.env"
+  else
+    echo "REQUEST_SUBDOMAIN_ARG=" >> "${CONFIG_DIR}/agent.env"
+  fi
 
   if [[ "${SYSTEMD_ENABLED}" == "true" ]]; then
     write_systemd_unit
@@ -364,7 +377,11 @@ print_summary() {
   else
     echo
     echo "systemd not in use. Run manually:"
-    echo "  tunely agent --relay ${RELAY} --tunnel-id ${TUNNEL_ID} --token ${TOKEN} --local ${LOCAL} --ping-interval-secs ${PING_INTERVAL_SECS} --max-backoff-secs ${MAX_BACKOFF_SECS}"
+    if [[ "${REQUEST_SUBDOMAIN}" == "true" ]]; then
+      echo "  tunely agent --relay ${RELAY} --tunnel-id ${TUNNEL_ID} --token ${TOKEN} --local ${LOCAL} --request-subdomain --ping-interval-secs ${PING_INTERVAL_SECS} --max-backoff-secs ${MAX_BACKOFF_SECS}"
+    else
+      echo "  tunely agent --relay ${RELAY} --tunnel-id ${TUNNEL_ID} --token ${TOKEN} --local ${LOCAL} --ping-interval-secs ${PING_INTERVAL_SECS} --max-backoff-secs ${MAX_BACKOFF_SECS}"
+    fi
   fi
 }
 

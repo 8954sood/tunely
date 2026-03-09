@@ -7,6 +7,7 @@ Tunely는 Rust로 구현한 경량 reverse tunnel MVP입니다.
 - Agent가 로컬 서버(`localhost`)로 프록시 후 응답 반환
 - WebSocket 요청도 `/t/<tunnel_id>/...` 경로로 터널링 지원
 - 바이너리 바디(이미지/파일) 전달 지원
+- (선택) Cloudflare + Caddy Admin API 기반 동적 서브도메인 자동 생성/삭제 지원
 
 ## 빠른 시작
 
@@ -34,11 +35,36 @@ auth_tokens:
 request_timeout_secs: 60
 ```
 
+동적 서브도메인 모드 예시:
+
+```yaml
+listen: "127.0.0.1:8080"
+auth_tokens:
+  - "xxx"
+enable_dynamic_subdomain: true
+base_domain: "example.com"
+cloudflare_api_token: "cf_token"
+cloudflare_zone_id: "cf_zone_id"
+public_origin: "1.2.3.4"
+caddy_admin_url: "http://127.0.0.1:2019"
+caddy_upstream: "127.0.0.1:8080"
+```
+
+```bash
+tunely agent \
+  --relay wss://relay.example.com/ws \
+  --tunnel-id demo \
+  --token xxx \
+  --local http://127.0.0.1:3000 \
+  --request-subdomain
+```
+
 ## 문서
 
 - 로컬 개발/실행: [docs/local-dev.md](docs/local-dev.md)
 - Ubuntu 설치/실행: [docs/ubuntu.md](docs/ubuntu.md)
 - Windows 실행: [docs/windows.md](docs/windows.md)
+- 설정 레퍼런스: [docs/config.md](docs/config.md)
 - Caddy 설정: [docs/caddy.md](docs/caddy.md)
 - 빌드/릴리즈: [docs/build-and-release.md](docs/build-and-release.md)
 - 트러블슈팅: [docs/troubleshooting.md](docs/troubleshooting.md)

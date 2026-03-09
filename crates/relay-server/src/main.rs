@@ -3,6 +3,7 @@ mod health;
 mod http_ingress;
 mod ingress;
 mod state;
+mod subdomain;
 mod ws_session;
 mod ws_tunnel;
 mod ws_wire;
@@ -14,6 +15,7 @@ use tracing::info;
 
 use config::Config;
 use state::AppState;
+use subdomain::SubdomainProvisioner;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -25,7 +27,17 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let config = Config::parse().resolve()?;
-    let state = AppState::new(config.auth_tokens.clone(), config.request_timeout_secs);
+    let subdomain = config
+        .dynamic_subdomain
+        .clone()
+        .map(SubdomainProvisioner::new)
+        .transpose()?
+        .map(std::sync::Arc::new);
+    let state = AppState::new(
+        config.auth_tokens.clone(),
+        config.request_timeout_secs,
+        subdomain,
+    );
 
     let app = Router::new()
         .route("/healthz", get(health::healthz))

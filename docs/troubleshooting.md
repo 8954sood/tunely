@@ -61,6 +61,43 @@ auth_tokens:
 1. 기존 agent 세션 종료
 2. 동일 id로 재연결하거나 다른 id 사용
 
+## `register rejected: dynamic subdomain is not enabled on relay`
+
+원인:
+
+- agent가 `--request-subdomain`으로 요청했지만 relay 동적 서브도메인 설정이 비활성화됨
+
+해결:
+
+1. relay 설정(`relay.yaml`)에 `enable_dynamic_subdomain: true` 적용
+2. `base_domain`, `cloudflare_api_token`, `cloudflare_zone_id`, `public_origin`, `caddy_admin_url` 값이 모두 설정됐는지 확인
+3. relay 재시작 후 agent 재연결
+
+## `register rejected: invalid tunnel_id for subdomain mode ...`
+
+원인:
+
+- `--request-subdomain` 모드에서 `tunnel_id`가 DNS 라벨 규칙을 만족하지 않음
+
+해결:
+
+1. `tunnel_id`를 소문자/숫자/하이픈(`-`)만 사용해 재시도
+2. 언더스코어(`_`), 대문자, 공백이 포함되지 않게 수정
+
+## `register rejected: subdomain provisioning failed: ...`
+
+원인:
+
+- Cloudflare DNS 생성/갱신 실패
+- Caddy Admin API 라우트 생성 실패
+
+해결:
+
+1. `cloudflare_api_token` 권한 확인(해당 zone DNS 수정 가능 권한)
+2. `cloudflare_zone_id`, `base_domain`, `public_origin` 값 확인
+3. `caddy_admin_url` 접근 가능 여부 확인 (예: `curl -s http://127.0.0.1:2019/config/`)
+4. Caddy가 실행 중인지 및 relay가 Caddy Admin에 접근 가능한지 확인
+
 ## `Address already in use`
 
 원인:
@@ -117,6 +154,7 @@ tunely agent --relay ws://<relay>/ws --tunnel-id <id> --token <token> --local ht
 - subdomain rewrite가 `/t/<tunnel_id>{uri}` 형태로 설정되어 있는지
 - 예: `wss://demo.example.com/ws` -> relay 내부 `/t/demo/ws`
 - DNS가 Caddy 서버를 가리키는지
+- 동적 모드라면 relay 로그에 subdomain provisioning 성공 로그가 있는지
 
 ### `WebSocket connection to 'wss://.../t/<id>/...' failed`
 
@@ -125,3 +163,11 @@ tunely agent --relay ws://<relay>/ws --tunnel-id <id> --token <token> --local ht
 - 해당 `tunnel_id` agent가 연결되어 있는지 (`agent registered` 로그)
 - local 서버의 WS endpoint 경로가 실제로 존재하는지
 - Caddy matcher 순서에서 `relay.example.com /ws*`와 `*.example.com rewrite`가 충돌하지 않는지
+
+### 동적 모드에서 agent 연결 해제 후 DNS가 남아 있음
+
+확인:
+
+- relay 로그에 `subdomain deprovision failed`가 있는지
+- Cloudflare 레코드 comment가 `managed-by=tunely`인지
+- relay가 Cloudflare API에 계속 접근 가능한지

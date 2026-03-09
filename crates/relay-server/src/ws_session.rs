@@ -18,6 +18,7 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::state::{AgentHandle, AppState, is_valid_tunnel_id};
+use crate::subdomain::is_valid_dns_label;
 use crate::ws_wire::send_control;
 
 pub async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
@@ -41,20 +42,29 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
         return;
     };
 
-    let (tunnel_id, token, protocol_version, capabilities) = match register_msg {
+    let (tunnel_id, token, request_subdomain, protocol_version, capabilities) = match register_msg {
         ControlMessage::RegisterAgent {
             tunnel_id,
             token,
+            request_subdomain,
             protocol_version,
             capabilities,
             ..
-        } => (tunnel_id, token, protocol_version, capabilities),
+        } => (
+            tunnel_id,
+            token,
+            request_subdomain,
+            protocol_version,
+            capabilities,
+        ),
         _ => {
             let _ = send_control(
                 &out_tx,
                 &ControlMessage::RegisterAck {
                     ok: false,
                     reason: Some("first message must be register_agent".to_string()),
+                    subdomain: None,
+                    public_url: None,
                     protocol_version: Some(PROTOCOL_VERSION),
                     capabilities: relay_capabilities(),
                 },
@@ -72,6 +82,8 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                 reason: Some(format!(
                     "unsupported protocol_version: {peer_protocol_version}"
                 )),
+                subdomain: None,
+                public_url: None,
                 protocol_version: Some(PROTOCOL_VERSION),
                 capabilities: relay_capabilities(),
             },
@@ -87,6 +99,8 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
             &ControlMessage::RegisterAck {
                 ok: false,
                 reason: Some("invalid tunnel_id format".to_string()),
+                subdomain: None,
+                public_url: None,
                 protocol_version: Some(PROTOCOL_VERSION),
                 capabilities: relay_capabilities(),
             },
@@ -102,6 +116,8 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
             &ControlMessage::RegisterAck {
                 ok: false,
                 reason: Some("invalid token".to_string()),
+                subdomain: None,
+                public_url: None,
                 protocol_version: Some(PROTOCOL_VERSION),
                 capabilities: relay_capabilities(),
             },
@@ -129,6 +145,8 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
             &ControlMessage::RegisterAck {
                 ok: false,
                 reason: Some("tunnel_id already in use".to_string()),
+                subdomain: None,
+                public_url: None,
                 protocol_version: Some(PROTOCOL_VERSION),
                 capabilities: relay_capabilities(),
             },
@@ -138,11 +156,77 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
         return;
     }
 
+    if request_subdomain && !is_valid_dns_label(&tunnel_id) {
+        let _ = send_control(
+            &out_tx,
+            &ControlMessage::RegisterAck {
+                ok: false,
+                reason: Some(
+                    "invalid tunnel_id for subdomain mode (use lowercase letters, numbers, '-')"
+                        .to_string(),
+                ),
+                subdomain: None,
+                public_url: None,
+                protocol_version: Some(PROTOCOL_VERSION),
+                capabilities: relay_capabilities(),
+            },
+        );
+        state.remove_agent_if(&tunnel_id, connection_id).await;
+        writer_task.abort();
+        return;
+    }
+
+    let mut provisioned_subdomain: Option<String> = None;
+    let mut provisioned_public_url: Option<String> = None;
+    if request_subdomain {
+        let Some(provisioner) = state.subdomain() else {
+            let _ = send_control(
+                &out_tx,
+                &ControlMessage::RegisterAck {
+                    ok: false,
+                    reason: Some("dynamic subdomain is not enabled on relay".to_string()),
+                    subdomain: None,
+                    public_url: None,
+                    protocol_version: Some(PROTOCOL_VERSION),
+                    capabilities: relay_capabilities(),
+                },
+            );
+            state.remove_agent_if(&tunnel_id, connection_id).await;
+            writer_task.abort();
+            return;
+        };
+        match provisioner.provision(&tunnel_id).await {
+            Ok(provisioned) => {
+                provisioned_subdomain = Some(provisioned.host);
+                provisioned_public_url = Some(provisioned.public_url);
+            }
+            Err(err) => {
+                warn!(error = %err, %tunnel_id, "subdomain provisioning failed");
+                let _ = send_control(
+                    &out_tx,
+                    &ControlMessage::RegisterAck {
+                        ok: false,
+                        reason: Some(format!("subdomain provisioning failed: {err}")),
+                        subdomain: None,
+                        public_url: None,
+                        protocol_version: Some(PROTOCOL_VERSION),
+                        capabilities: relay_capabilities(),
+                    },
+                );
+                state.remove_agent_if(&tunnel_id, connection_id).await;
+                writer_task.abort();
+                return;
+            }
+        }
+    }
+
     let _ = send_control(
         &out_tx,
         &ControlMessage::RegisterAck {
             ok: true,
             reason: None,
+            subdomain: provisioned_subdomain.clone(),
+            public_url: provisioned_public_url.clone(),
             protocol_version: Some(PROTOCOL_VERSION),
             capabilities: relay_capabilities(),
         },
@@ -175,6 +259,12 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     }
 
     state.remove_agent_if(&tunnel_id, connection_id).await;
+    if request_subdomain
+        && let Some(provisioner) = state.subdomain()
+        && let Err(err) = provisioner.deprovision(&tunnel_id).await
+    {
+        warn!(error = %err, %tunnel_id, "subdomain deprovision failed");
+    }
     info!(%tunnel_id, %connection_id, "agent disconnected");
     writer_task.abort();
 }

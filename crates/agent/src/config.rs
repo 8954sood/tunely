@@ -11,6 +11,8 @@ pub struct Config {
     pub token: String,
     #[arg(long)]
     pub local: String,
+    #[arg(long, default_value_t = false)]
+    pub request_subdomain: bool,
     #[arg(long, default_value_t = 20)]
     pub ping_interval_secs: u64,
     #[arg(long, default_value_t = 30)]
