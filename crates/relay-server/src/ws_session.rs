@@ -69,7 +69,6 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                     capabilities: relay_capabilities(),
                 },
             );
-            writer_task.abort();
             return;
         }
     };
@@ -89,7 +88,6 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
             },
         );
         warn!(%tunnel_id, protocol_version = peer_protocol_version, "agent register rejected: unsupported protocol_version");
-        writer_task.abort();
         return;
     }
 
@@ -106,7 +104,6 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
             },
         );
         warn!(%tunnel_id, "agent register rejected: invalid tunnel_id format");
-        writer_task.abort();
         return;
     }
 
@@ -123,7 +120,6 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
             },
         );
         warn!(%tunnel_id, "agent register rejected: invalid token");
-        writer_task.abort();
         return;
     }
 
@@ -152,7 +148,6 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
             },
         );
         warn!(%tunnel_id, "agent register rejected: tunnel_id already in use");
-        writer_task.abort();
         return;
     }
 
@@ -172,7 +167,6 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
             },
         );
         state.remove_agent_if(&tunnel_id, connection_id).await;
-        writer_task.abort();
         return;
     }
 
@@ -192,7 +186,6 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                 },
             );
             state.remove_agent_if(&tunnel_id, connection_id).await;
-            writer_task.abort();
             return;
         };
         match provisioner.provision(&tunnel_id).await {
@@ -214,7 +207,6 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                     },
                 );
                 state.remove_agent_if(&tunnel_id, connection_id).await;
-                writer_task.abort();
                 return;
             }
         }
