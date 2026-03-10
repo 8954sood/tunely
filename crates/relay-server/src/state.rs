@@ -114,7 +114,7 @@ impl AppState {
         agents.get(tunnel_id).cloned()
     }
 
-    pub async fn remove_agent_if(&self, tunnel_id: &str, connection_id: Uuid) {
+    pub async fn remove_agent_if(&self, tunnel_id: &str, connection_id: Uuid) -> bool {
         let mut agents = self.agents.write().await;
         let should_remove = agents
             .get(tunnel_id)
@@ -124,6 +124,7 @@ impl AppState {
             self.fail_ws_pending_for_tunnel(tunnel_id, "agent disconnected");
             self.close_ws_for_tunnel(tunnel_id, Some(1011), "agent disconnected");
         }
+        should_remove
     }
 
     pub fn add_inflight(&self, request_id: Uuid, sender: mpsc::Sender<RelayEvent>) {

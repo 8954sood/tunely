@@ -21,6 +21,8 @@ use crate::state::{AgentHandle, AppState, is_valid_tunnel_id};
 use crate::subdomain::is_valid_dns_label;
 use crate::ws_wire::send_control;
 
+const SUBDOMAIN_DEPROVISION_GRACE_SECS: u64 = 30;
+
 pub async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
     ws.on_upgrade(move |socket| handle_socket(socket, state))
 }
@@ -173,7 +175,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                 capabilities: relay_capabilities(),
             },
         );
-        state.remove_agent_if(&tunnel_id, connection_id).await;
+        let _ = state.remove_agent_if(&tunnel_id, connection_id).await;
         return;
     }
 
@@ -193,7 +195,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                     capabilities: relay_capabilities(),
                 },
             );
-            state.remove_agent_if(&tunnel_id, connection_id).await;
+            let _ = state.remove_agent_if(&tunnel_id, connection_id).await;
             return;
         };
         match provisioner.provision(&tunnel_id).await {
@@ -220,7 +222,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                         capabilities: relay_capabilities(),
                     },
                 );
-                state.remove_agent_if(&tunnel_id, connection_id).await;
+                let _ = state.remove_agent_if(&tunnel_id, connection_id).await;
                 return;
             }
         }
@@ -269,12 +271,26 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
         }
     }
 
-    state.remove_agent_if(&tunnel_id, connection_id).await;
-    if request_subdomain
-        && let Some(provisioner) = state.subdomain()
-        && let Err(err) = provisioner.deprovision(&tunnel_id).await
-    {
-        warn!(error = %err, %tunnel_id, "subdomain deprovision failed");
+    let removed = state.remove_agent_if(&tunnel_id, connection_id).await;
+    if request_subdomain && removed {
+        let state_for_cleanup = state.clone();
+        let tunnel_id_for_cleanup = tunnel_id.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(SUBDOMAIN_DEPROVISION_GRACE_SECS)).await;
+            if state_for_cleanup.get_agent(&tunnel_id_for_cleanup).await.is_some() {
+                debug!(
+                    tunnel_id = %tunnel_id_for_cleanup,
+                    grace_secs = SUBDOMAIN_DEPROVISION_GRACE_SECS,
+                    "skipping deprovision because agent reconnected during grace window"
+                );
+                return;
+            }
+            if let Some(provisioner) = state_for_cleanup.subdomain()
+                && let Err(err) = provisioner.deprovision(&tunnel_id_for_cleanup).await
+            {
+                warn!(error = %err, tunnel_id = %tunnel_id_for_cleanup, "subdomain deprovision failed");
+            }
+        });
     }
     info!(%tunnel_id, %connection_id, "agent disconnected");
     writer_task.abort();

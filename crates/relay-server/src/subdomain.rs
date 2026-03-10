@@ -91,7 +91,8 @@ impl SubdomainProvisioner {
             .iter()
             .find(|record| record.record_type == desired.record_type)
         {
-            if !self.cfg.allow_existing_subdomain_resources {
+            let managed_by_tunely = primary.comment.as_deref() == Some(MANAGED_COMMENT);
+            if !managed_by_tunely && !self.cfg.allow_existing_subdomain_resources {
                 anyhow::bail!(
                     "cloudflare dns conflict: existing {} record for {} (record_id={}); set allow_existing_subdomain_resources=true to take over",
                     primary.record_type,
@@ -160,28 +161,9 @@ impl SubdomainProvisioner {
         debug!(%tunnel_id, %host, %route_id, "ensuring caddy route");
         let exists = self.caddy_route_exists(&route_id).await?;
         debug!(%tunnel_id, %route_id, exists, "caddy route existence checked");
-        if exists && !self.cfg.allow_existing_subdomain_resources {
-            anyhow::bail!(
-                "caddy route conflict: existing route_id={} for host {}; set allow_existing_subdomain_resources=true to take over",
-                route_id,
-                host
-            );
-        }
-
-        let url = format!("{}/id/{}", self.caddy_admin_base(), route_id);
         if exists {
-            debug!(%tunnel_id, %route_id, url = %url, "updating caddy route by id");
-            let response = self.client.put(url).json(&route).send().await?;
-            if response.status().is_success() {
-                debug!(%tunnel_id, %route_id, "caddy route updated");
-                return Ok(());
-            }
-            let status = response.status();
-            let body = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "<failed to read response>".to_string());
-            anyhow::bail!("caddy route upsert failed ({status}): {body}");
+            debug!(%tunnel_id, %route_id, "reusing existing caddy route without reconfigure");
+            return Ok(());
         }
         debug!(%tunnel_id, %route_id, "caddy route does not exist; creating route");
         self.create_caddy_route(&route).await
