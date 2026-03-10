@@ -14,7 +14,7 @@ use protocol::{
     decode_chunk_header, decode_ws_payload, is_supported_protocol_version,
 };
 use tokio::sync::mpsc;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use crate::state::{AgentHandle, AppState, is_valid_tunnel_id};
@@ -73,6 +73,13 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
         }
     };
     let peer_protocol_version = protocol_version.unwrap_or(LEGACY_PROTOCOL_VERSION);
+    debug!(
+        %tunnel_id,
+        request_subdomain,
+        protocol_version = peer_protocol_version,
+        capability_count = capabilities.len(),
+        "received register_agent"
+    );
     if !is_supported_protocol_version(peer_protocol_version) {
         let _ = send_control(
             &out_tx,
@@ -173,6 +180,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     let mut provisioned_subdomain: Option<String> = None;
     let mut provisioned_public_url: Option<String> = None;
     if request_subdomain {
+        debug!(%tunnel_id, "subdomain requested by agent; starting provision flow");
         let Some(provisioner) = state.subdomain() else {
             let _ = send_control(
                 &out_tx,
@@ -190,6 +198,12 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
         };
         match provisioner.provision(&tunnel_id).await {
             Ok(provisioned) => {
+                debug!(
+                    %tunnel_id,
+                    host = %provisioned.host,
+                    public_url = %provisioned.public_url,
+                    "subdomain provision succeeded"
+                );
                 provisioned_subdomain = Some(provisioned.host);
                 provisioned_public_url = Some(provisioned.public_url);
             }
@@ -212,6 +226,11 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
         }
     }
 
+    debug!(
+        %tunnel_id,
+        has_subdomain = provisioned_subdomain.is_some(),
+        "sending register ack"
+    );
     let _ = send_control(
         &out_tx,
         &ControlMessage::RegisterAck {

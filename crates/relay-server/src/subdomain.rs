@@ -4,7 +4,7 @@ use anyhow::Context;
 use reqwest::Client;
 use serde::Deserialize;
 use serde_json::json;
-use tracing::warn;
+use tracing::{debug, warn};
 
 use crate::config::DynamicSubdomainConfig;
 
@@ -50,11 +50,14 @@ impl SubdomainProvisioner {
 
     pub async fn provision(&self, tunnel_id: &str) -> anyhow::Result<ProvisionedSubdomain> {
         let host = self.subdomain_host_for_tunnel(tunnel_id);
+        debug!(%tunnel_id, %host, "starting subdomain provision");
         self.ensure_cloudflare_record(&host).await?;
         if let Err(err) = self.ensure_caddy_route(tunnel_id, &host).await {
+            debug!(%tunnel_id, %host, error = %err, "provision failed; rolling back cloudflare record");
             let _ = self.delete_cloudflare_record(&host).await;
             return Err(err);
         }
+        debug!(%tunnel_id, %host, "subdomain provision completed");
         Ok(ProvisionedSubdomain {
             public_url: self.public_url_for_host(&host),
             host,
@@ -63,15 +66,27 @@ impl SubdomainProvisioner {
 
     pub async fn deprovision(&self, tunnel_id: &str) -> anyhow::Result<()> {
         let host = self.subdomain_host_for_tunnel(tunnel_id);
+        debug!(%tunnel_id, %host, "starting subdomain deprovision");
         if let Err(err) = self.delete_caddy_route(tunnel_id).await {
             warn!(error = %err, %tunnel_id, "failed to delete caddy route");
         }
-        self.delete_cloudflare_record(&host).await
+        let result = self.delete_cloudflare_record(&host).await;
+        if result.is_ok() {
+            debug!(%tunnel_id, %host, "subdomain deprovision completed");
+        }
+        result
     }
 
     async fn ensure_cloudflare_record(&self, host: &str) -> anyhow::Result<()> {
         let desired = self.desired_record(host);
+        debug!(
+            host = %desired.name,
+            record_type = %desired.record_type,
+            content = %desired.content,
+            "ensuring cloudflare record"
+        );
         let existing = self.find_cloudflare_records(host).await?;
+        debug!(host, existing_count = existing.len(), "cloudflare record lookup finished");
         if let Some(primary) = existing
             .iter()
             .find(|record| record.record_type == desired.record_type)
@@ -88,9 +103,13 @@ impl SubdomainProvisioner {
                 || primary.proxied.unwrap_or(false)
                 || primary.comment.as_deref() != Some(MANAGED_COMMENT);
             if needs_update {
+                debug!(host, record_id = %primary.id, "updating existing cloudflare record");
                 self.put_cloudflare_record(&primary.id, &desired).await?;
+            } else {
+                debug!(host, record_id = %primary.id, "existing cloudflare record already matches desired state");
             }
         } else {
+            debug!(host, "creating new cloudflare record");
             self.post_cloudflare_record(&desired).await?;
         }
         Ok(())
@@ -98,6 +117,7 @@ impl SubdomainProvisioner {
 
     async fn delete_cloudflare_record(&self, host: &str) -> anyhow::Result<()> {
         let desired = self.desired_record(host);
+        debug!(host, record_type = %desired.record_type, "deleting managed cloudflare records");
         let existing = self.find_cloudflare_records(host).await?;
         for record in existing {
             if record.record_type != desired.record_type {
@@ -106,6 +126,7 @@ impl SubdomainProvisioner {
             if record.comment.as_deref() != Some(MANAGED_COMMENT) {
                 continue;
             }
+            debug!(host, record_id = %record.id, "deleting cloudflare record");
             self.delete_cloudflare_record_by_id(&record.id).await?;
         }
         Ok(())
@@ -136,7 +157,9 @@ impl SubdomainProvisioner {
             ],
             "terminal": true,
         });
+        debug!(%tunnel_id, %host, %route_id, "ensuring caddy route");
         let exists = self.caddy_route_exists(&route_id).await?;
+        debug!(%tunnel_id, %route_id, exists, "caddy route existence checked");
         if exists && !self.cfg.allow_existing_subdomain_resources {
             anyhow::bail!(
                 "caddy route conflict: existing route_id={} for host {}; set allow_existing_subdomain_resources=true to take over",
@@ -147,8 +170,10 @@ impl SubdomainProvisioner {
 
         let url = format!("{}/id/{}", self.caddy_admin_base(), route_id);
         if exists {
+            debug!(%tunnel_id, %route_id, url = %url, "updating caddy route by id");
             let response = self.client.put(url).json(&route).send().await?;
             if response.status().is_success() {
+                debug!(%tunnel_id, %route_id, "caddy route updated");
                 return Ok(());
             }
             let status = response.status();
@@ -158,11 +183,13 @@ impl SubdomainProvisioner {
                 .unwrap_or_else(|_| "<failed to read response>".to_string());
             anyhow::bail!("caddy route upsert failed ({status}): {body}");
         }
+        debug!(%tunnel_id, %route_id, "caddy route does not exist; creating route");
         self.create_caddy_route(&route).await
     }
 
     async fn create_caddy_route(&self, route: &serde_json::Value) -> anyhow::Result<()> {
         let servers_url = format!("{}/config/apps/http/servers", self.caddy_admin_base());
+        debug!(url = %servers_url, "looking up caddy http servers");
         let servers_response = self.client.get(&servers_url).send().await?;
         if !servers_response.status().is_success() {
             let status = servers_response.status();
@@ -186,12 +213,14 @@ impl SubdomainProvisioner {
                 }
             })
             .context("no HTTP servers found in Caddy config")?;
+        debug!(%server_id, "selected caddy server for route create");
 
         let routes_url = format!(
             "{}/config/apps/http/servers/{}/routes",
             self.caddy_admin_base(),
             server_id
         );
+        debug!(url = %routes_url, "creating caddy route");
         let create_response = self.client.post(routes_url).json(route).send().await?;
         if !create_response.status().is_success() {
             let status = create_response.status();
@@ -201,13 +230,17 @@ impl SubdomainProvisioner {
                 .unwrap_or_else(|_| "<failed to read response>".to_string());
             anyhow::bail!("caddy route create failed ({status}): {body}");
         }
+        debug!("caddy route created");
         Ok(())
     }
 
     async fn delete_caddy_route(&self, tunnel_id: &str) -> anyhow::Result<()> {
-        let url = format!("{}/id/{}", self.caddy_admin_base(), route_id(tunnel_id));
+        let route_id = route_id(tunnel_id);
+        let url = format!("{}/id/{}", self.caddy_admin_base(), route_id);
+        debug!(%tunnel_id, %route_id, url = %url, "deleting caddy route");
         let response = self.client.delete(url).send().await?;
         if response.status().is_success() || response.status().as_u16() == 404 {
+            debug!(%tunnel_id, %route_id, status = %response.status(), "caddy route delete completed");
             return Ok(());
         }
         let status = response.status();
@@ -220,11 +253,14 @@ impl SubdomainProvisioner {
 
     async fn caddy_route_exists(&self, route_id: &str) -> anyhow::Result<bool> {
         let url = format!("{}/id/{}", self.caddy_admin_base(), route_id);
+        debug!(%route_id, url = %url, "checking caddy route existence");
         let response = self.client.get(url).send().await?;
         if response.status().is_success() {
+            debug!(%route_id, "caddy route exists");
             return Ok(true);
         }
         if response.status().as_u16() == 404 {
+            debug!(%route_id, "caddy route does not exist");
             return Ok(false);
         }
         let status = response.status();
@@ -269,6 +305,7 @@ impl SubdomainProvisioner {
     }
 
     async fn find_cloudflare_records(&self, host: &str) -> anyhow::Result<Vec<CloudflareRecord>> {
+        debug!(%host, "querying cloudflare dns records");
         let response = self
             .client
             .get(self.cloudflare_base())
@@ -288,6 +325,7 @@ impl SubdomainProvisioner {
                 format_cloudflare_errors(payload.errors)
             );
         }
+        debug!(%host, count = payload.result.len(), "cloudflare dns lookup succeeded");
         Ok(payload.result)
     }
 
