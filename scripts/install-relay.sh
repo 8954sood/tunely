@@ -264,6 +264,7 @@ ensure_config_files() {
 # public_origin: "1.2.3.4"
 # caddy_admin_url: "http://127.0.0.1:2019"
 # caddy_upstream: "127.0.0.1:8080"
+# allow_existing_subdomain_resources: false
 YAML
   fi
 }

@@ -97,6 +97,7 @@ auth_tokens:
 2. `cloudflare_zone_id`, `base_domain`, `public_origin` 값 확인
 3. `caddy_admin_url` 접근 가능 여부 확인 (예: `curl -s http://127.0.0.1:2019/config/`)
 4. Caddy가 실행 중인지 및 relay가 Caddy Admin에 접근 가능한지 확인
+5. 기존 DNS 레코드/route가 있으면 기본값에서 실패하므로, 필요 시 `allow_existing_subdomain_resources: true` 설정
 
 ## `Address already in use`
 

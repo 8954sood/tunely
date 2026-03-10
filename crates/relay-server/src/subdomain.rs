@@ -76,6 +76,14 @@ impl SubdomainProvisioner {
             .iter()
             .find(|record| record.record_type == desired.record_type)
         {
+            if !self.cfg.allow_existing_subdomain_resources {
+                anyhow::bail!(
+                    "cloudflare dns conflict: existing {} record for {} (record_id={}); set allow_existing_subdomain_resources=true to take over",
+                    primary.record_type,
+                    host,
+                    primary.id
+                );
+            }
             let needs_update = primary.content != desired.content
                 || primary.proxied.unwrap_or(false)
                 || primary.comment.as_deref() != Some(MANAGED_COMMENT);
@@ -128,20 +136,29 @@ impl SubdomainProvisioner {
             ],
             "terminal": true,
         });
+        let exists = self.caddy_route_exists(&route_id).await?;
+        if exists && !self.cfg.allow_existing_subdomain_resources {
+            anyhow::bail!(
+                "caddy route conflict: existing route_id={} for host {}; set allow_existing_subdomain_resources=true to take over",
+                route_id,
+                host
+            );
+        }
+
         let url = format!("{}/id/{}", self.caddy_admin_base(), route_id);
-        let response = self.client.put(url).json(&route).send().await?;
-        if response.status().is_success() {
-            return Ok(());
+        if exists {
+            let response = self.client.put(url).json(&route).send().await?;
+            if response.status().is_success() {
+                return Ok(());
+            }
+            let status = response.status();
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "<failed to read response>".to_string());
+            anyhow::bail!("caddy route upsert failed ({status}): {body}");
         }
-        if response.status().as_u16() == 404 {
-            return self.create_caddy_route(&route).await;
-        }
-        let status = response.status();
-        let body = response
-            .text()
-            .await
-            .unwrap_or_else(|_| "<failed to read response>".to_string());
-        anyhow::bail!("caddy route upsert failed ({status}): {body}");
+        self.create_caddy_route(&route).await
     }
 
     async fn create_caddy_route(&self, route: &serde_json::Value) -> anyhow::Result<()> {
@@ -199,6 +216,23 @@ impl SubdomainProvisioner {
             .await
             .unwrap_or_else(|_| "<failed to read response>".to_string());
         anyhow::bail!("caddy route delete failed ({status}): {body}");
+    }
+
+    async fn caddy_route_exists(&self, route_id: &str) -> anyhow::Result<bool> {
+        let url = format!("{}/id/{}", self.caddy_admin_base(), route_id);
+        let response = self.client.get(url).send().await?;
+        if response.status().is_success() {
+            return Ok(true);
+        }
+        if response.status().as_u16() == 404 {
+            return Ok(false);
+        }
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .unwrap_or_else(|_| "<failed to read response>".to_string());
+        anyhow::bail!("caddy route lookup failed ({status}): {body}");
     }
 
     fn desired_record(&self, host: &str) -> DesiredRecord {

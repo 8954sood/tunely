@@ -97,7 +97,11 @@ cloudflare_zone_id: "<CF_ZONE_ID>"
 public_origin: "1.2.3.4"
 caddy_admin_url: "http://127.0.0.1:2019"
 caddy_upstream: "127.0.0.1:8080"
+allow_existing_subdomain_resources: false
 ```
+
+기본값에서는 기존 DNS/route가 이미 있으면 provisioning이 실패합니다.
+기존 리소스를 이어서 사용하려면 `allow_existing_subdomain_resources: true`를 설정하세요.
 
 ### 4-3) Caddy 설정 예시 (Admin API 활성화)
 

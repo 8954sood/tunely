@@ -34,6 +34,8 @@ pub struct Config {
     pub caddy_admin_url: Option<String>,
     #[arg(long)]
     pub caddy_upstream: Option<String>,
+    #[arg(long, num_args = 0..=1, default_missing_value = "true")]
+    pub allow_existing_subdomain_resources: Option<bool>,
 }
 
 #[derive(Debug, Clone)]
@@ -44,6 +46,7 @@ pub struct DynamicSubdomainConfig {
     pub public_origin: String,
     pub caddy_admin_url: String,
     pub caddy_upstream: String,
+    pub allow_existing_subdomain_resources: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -66,6 +69,7 @@ struct FileConfig {
     public_origin: Option<String>,
     caddy_admin_url: Option<String>,
     caddy_upstream: Option<String>,
+    allow_existing_subdomain_resources: Option<bool>,
 }
 
 impl Config {
@@ -83,6 +87,7 @@ impl Config {
         let mut public_origin: Option<String> = None;
         let mut caddy_admin_url: Option<String> = None;
         let mut caddy_upstream: Option<String> = None;
+        let mut allow_existing_subdomain_resources = false;
 
         if let Some(path) = self.config {
             let file_cfg = load_file_config(&path)?;
@@ -116,6 +121,9 @@ impl Config {
             if let Some(value) = file_cfg.caddy_upstream {
                 caddy_upstream = Some(value);
             }
+            if let Some(value) = file_cfg.allow_existing_subdomain_resources {
+                allow_existing_subdomain_resources = value;
+            }
         }
 
         if let Some(listen) = self.listen {
@@ -148,6 +156,9 @@ impl Config {
         if let Some(value) = self.caddy_upstream {
             caddy_upstream = Some(value);
         }
+        if let Some(value) = self.allow_existing_subdomain_resources {
+            allow_existing_subdomain_resources = value;
+        }
 
         if enable_dynamic_subdomain {
             let caddy_upstream = caddy_upstream.unwrap_or_else(|| resolved.listen.clone());
@@ -161,6 +172,7 @@ impl Config {
                 public_origin: normalize_non_empty(public_origin, "public_origin")?,
                 caddy_admin_url: normalize_non_empty(caddy_admin_url, "caddy_admin_url")?,
                 caddy_upstream: normalize_non_empty(Some(caddy_upstream), "caddy_upstream")?,
+                allow_existing_subdomain_resources,
             });
         }
 
@@ -283,6 +295,7 @@ mod tests {
             public_origin: None,
             caddy_admin_url: None,
             caddy_upstream: None,
+            allow_existing_subdomain_resources: None,
         };
 
         let resolved = cfg.resolve().expect("resolve");
@@ -328,6 +341,7 @@ mod tests {
             public_origin: None,
             caddy_admin_url: None,
             caddy_upstream: None,
+            allow_existing_subdomain_resources: None,
         };
         let err = cfg.resolve().expect_err("must fail");
         let _ = fs::remove_file(path);
@@ -350,6 +364,7 @@ mod tests {
             public_origin: Some("1.2.3.4".to_string()),
             caddy_admin_url: Some("http://127.0.0.1:2019".to_string()),
             caddy_upstream: Some("127.0.0.1:8080".to_string()),
+            allow_existing_subdomain_resources: None,
         };
         let err = cfg.resolve().expect_err("must fail");
         assert!(err.to_string().contains("cloudflare_api_token"));
@@ -367,5 +382,92 @@ mod tests {
         ])
         .expect("parse");
         assert_eq!(cfg.enable_dynamic_subdomain, Some(true));
+    }
+
+    #[test]
+    fn allow_existing_subdomain_resources_flag_without_value_sets_true() {
+        let cfg = Config::try_parse_from([
+            "relay-server",
+            "--allow-existing-subdomain-resources",
+            "--listen",
+            "127.0.0.1:8080",
+            "--auth-token",
+            "tok",
+        ])
+        .expect("parse");
+        assert_eq!(cfg.allow_existing_subdomain_resources, Some(true));
+    }
+
+    #[test]
+    fn dynamic_subdomain_allow_existing_defaults_false() {
+        let mut tokens = HashSet::new();
+        tokens.insert("tok".to_string());
+        let cfg = Config {
+            config: None,
+            listen: Some("127.0.0.1:8080".to_string()),
+            auth_tokens: Some(tokens),
+            request_timeout_secs: Some(30),
+            enable_dynamic_subdomain: Some(true),
+            base_domain: Some("example.com".to_string()),
+            cloudflare_api_token: Some("token".to_string()),
+            cloudflare_zone_id: Some("zone".to_string()),
+            public_origin: Some("1.2.3.4".to_string()),
+            caddy_admin_url: Some("http://127.0.0.1:2019".to_string()),
+            caddy_upstream: Some("127.0.0.1:8080".to_string()),
+            allow_existing_subdomain_resources: None,
+        };
+
+        let resolved = cfg.resolve().expect("resolve");
+        let dynamic = resolved.dynamic_subdomain.expect("dynamic");
+        assert!(!dynamic.allow_existing_subdomain_resources);
+    }
+
+    #[test]
+    fn cli_overrides_file_for_allow_existing_subdomain_resources() {
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "tunely-relay-allow-existing-config-{}-{}.yaml",
+            std::process::id(),
+            ts
+        ));
+        fs::write(
+            &path,
+            r#"
+listen: "127.0.0.1:8080"
+auth_tokens: ["tok"]
+enable_dynamic_subdomain: true
+base_domain: "example.com"
+cloudflare_api_token: "token"
+cloudflare_zone_id: "zone"
+public_origin: "1.2.3.4"
+caddy_admin_url: "http://127.0.0.1:2019"
+caddy_upstream: "127.0.0.1:8080"
+allow_existing_subdomain_resources: true
+"#,
+        )
+        .expect("write");
+
+        let cfg = Config {
+            config: Some(path.clone()),
+            listen: None,
+            auth_tokens: None,
+            request_timeout_secs: None,
+            enable_dynamic_subdomain: None,
+            base_domain: None,
+            cloudflare_api_token: None,
+            cloudflare_zone_id: None,
+            public_origin: None,
+            caddy_admin_url: None,
+            caddy_upstream: None,
+            allow_existing_subdomain_resources: Some(false),
+        };
+
+        let resolved = cfg.resolve().expect("resolve");
+        let _ = fs::remove_file(path);
+        let dynamic = resolved.dynamic_subdomain.expect("dynamic");
+        assert!(!dynamic.allow_existing_subdomain_resources);
     }
 }
